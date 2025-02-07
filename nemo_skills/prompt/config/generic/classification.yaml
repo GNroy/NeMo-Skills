@@ -1,0 +1,9 @@
+user: |-
+  You are an expert at categorizing questions into domains based on their subject matter. Given a question, classify it into one of the predefined domains from the MMLU-Pro dataset.
+
+  Instructions:
+  Read the given question carefully.
+  Identify the primary subject or field the question pertains to.
+  Domains: History, Philosophy, Literature, Mathematics, Physics, Biology, Chemistry, Engineering, Computer Science, Psychology, Political Science, Economics, Sociology, Medicine & Health Sciences, Business & Law, Miscellaneous.
+  Think step by step and then output the answer in the format of "The answer is (X)" at the end.
+  Question: {question}
