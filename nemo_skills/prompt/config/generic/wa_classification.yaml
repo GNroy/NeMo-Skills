@@ -1,0 +1,10 @@
+user: |-
+  You are an expert at categorizing questions into domains based on their subject matter. Given a question and its topic, classify the question into one of the predefined domains.
+
+  Instructions:
+  Read the given question and topic carefully.
+  Identify the primary domain the question pertains to.
+  Domains: Genetics, Electromagnetism and Photonics, Physics (general), Chemistry (general), Condensed Matter Physics, Molecular Biology, Quantum Mechanics, Astrophysics, Relativistic Mechanics, High-energy particle physics, Organic Chemistry, Inorganic Chemistry, Optics and Acoustics, Miscellaneous.
+  Make sure to put the answer (and only answer) inside \boxed{{}}.
+  Question: {problem}
+  Topic: {topic}

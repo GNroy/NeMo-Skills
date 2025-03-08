@@ -1,0 +1,4 @@
+user: |-
+  Solve the following problem. Make sure to put the final answer letter (A, B, C or D) inside \boxed{{}}.
+
+  {input}

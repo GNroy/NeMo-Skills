@@ -1,0 +1,4 @@
+user: |-
+  Answer the following question, and make sure to put the answer (and only answer) inside \boxed{{}}.
+
+  {input}

@@ -1,0 +1,5 @@
+# Dasha's prompt config
+
+system: ""
+
+user: "{question}\n\n{options}"

@@ -9,21 +9,6 @@ user: |-
   C. {C}
   D. {D}
 
-  - For simple problems:
-  Directly provide the answer with minimal explanation.
-
-  - For complex problems:
-  Use this step-by-step format:
-  ## Step 1: [Concise description]
-  [Brief explanation]
-  ## Step 2: [Concise description]
-  [Brief explanation]
-  ## Step 3: [Concise description]
-  [Brief explanation]
-  Continue as needed.
-
-  Regardless of the approach, always conclude with:
+  Always conclude with:
   The final answer is [the_answer_letter].
   where the [the_answer_letter] is one of A, B, C or D.
-
-  Let's think step by step.
