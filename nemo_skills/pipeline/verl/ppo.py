@@ -334,8 +334,11 @@ def ppo_verl(
                 "model": server_model,
             }
         # TODO: better way to pass arguments?
+        server_args = f'{json.dumps(client_server_args)}'
+        if cluster_config['executor'] != 'local':
+            server_args = f"'{server_args}'"
         cluster_config["required_env_vars"] = cluster_config.get("required_env_vars", []) + [
-            f"REWARD_SERVER_ARGS='{json.dumps(client_server_args)}'"
+            f"REWARD_SERVER_ARGS={server_args}"
         ]
 
     with run.Experiment(expname) as exp:
