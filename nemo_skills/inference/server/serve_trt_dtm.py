@@ -23,6 +23,7 @@ from argparse import ArgumentParser
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict, List, Optional
 
+import numpy as np
 import tensorrt_llm
 import tensorrt_llm.bindings.executor as trtllm
 import torch
@@ -472,7 +473,8 @@ def _stream(
 class TensorRTLLM:
     def __init__(
         self,
-        model_path: str,
+        target_model_path: str,
+        draft_model_path: str,
         max_batch_size: Optional[int] = None,
         max_input_len: Optional[int] = None,
         max_output_len: Optional[int] = None,
@@ -481,10 +483,9 @@ class TensorRTLLM:
         kv_cache_free_gpu_memory_fraction: Optional[float] = None,
         disable_chunked_context: bool = False,
     ):
-        self.tokenizer, self.pad_id, self.end_id = load_tokenizer(tokenizer_dir=model_path)
+        self.tokenizer, self.pad_id, self.end_id = load_tokenizer(tokenizer_dir=target_model_path)
 
         runner_kwargs = dict(
-            engine_dir=model_path,
             rank=tensorrt_llm.mpi_rank(),
             max_batch_size=max_batch_size,
             max_input_len=max_input_len,
@@ -495,7 +496,9 @@ class TensorRTLLM:
             kv_cache_enable_block_reuse=True,
         )
 
-        self.runner = ModelRunnerCpp.from_dir(**runner_kwargs)
+        self.target_runner = ModelRunnerCpp.from_dir(engine_dir=target_model_path, **runner_kwargs)
+        self.draft_runner = ModelRunnerCpp.from_dir(engine_dir=draft_model_path, **runner_kwargs)
+
         self.timeout = timeout_seconds
 
         self.active_generations = {}
@@ -517,10 +520,30 @@ class TensorRTLLM:
         stop_words_list,
         top_logprobs,
     ):
-        try:
-            request_id, stream_kwargs = generate(
-                self.runner,
-                batch_input_ids[0],
+        # TODO: pass as param
+        draft_len = 4
+
+        prefix = batch_input_ids
+        input_batch_size = len(batch_input_ids)  # Note as `BS`
+        beam_width = 1  # Note as `BW`
+
+        # Repack the output like the output of function `generate`
+        input_len = [len(p) for p in batch_input_ids]
+        max_seq_len = [i + max_output_token for i in input_len]
+        outputs = {}
+        outputs["output_ids"] = torch.full([1, 1, max(max_seq_len)], self.end_id, dtype=torch.int32)
+        for bi in range(input_batch_size):
+            outputs["output_ids"][bi, :, : input_len[bi]] = batch_input_ids[bi]
+        outputs["sequence_lengths"] = torch.full([input_batch_size, beam_width], 0, dtype=torch.int32)
+
+        n_draft_token = [0 for _ in range(input_batch_size)]
+        n_accept_token = [0 for _ in range(input_batch_size)]
+        n_iteration = 0
+
+        while True:
+            n_iteration += 1
+            draft = self.draft_runner.generate(
+                prefix,
                 max_new_tokens=max_output_token,
                 end_id=self.end_id,
                 pad_id=self.pad_id,
@@ -531,27 +554,104 @@ class TensorRTLLM:
                 repetition_penalty=repetition_penalty,
                 random_seed=random_seed,
                 output_log_probs=bool(top_logprobs is not None),
-                # stop words in trtllm are supported on the token-level only and this representation is not unique
-                # so instead of passing in all tokenizations (is that even possible?) of each phrase, we will
-                # instead stream outputs and detokenize them to check for stop words - this is done inside
-                # overriden generate/stream functions above
-                tokenizer=self.tokenizer,
-                stop_words_list=stop_words_list,
                 input_lengths=input_lengths,
                 return_dict=True,
                 output_sequence_lengths=True,
-                streaming=True,
+                streaming=False,
                 timeout=self.timeout,
             )
-            self.active_requests[generation_id] = request_id
-            output = _stream(**stream_kwargs)
+            prefix_len = [len(prefix[i]) for i in range(input_batch_size)]
+            # draft["output_ids"].shape -> [BS, BW, maxSL]
+            # draft["sequence_lengths"].shape -> [BS, BW]
+            # draft["generation_logits"].shape -> [BS, BW, draft_len, vocab_size]
+            d_ids = [[self.end_id]] * input_batch_size
+            d_seq_len = draft["sequence_lengths"][:, 0].tolist()
+            d_len = [d_seq_len[bi] - prefix_len[bi] for bi in range(input_batch_size)]
+            for bi in range(input_batch_size):
+                l, r = prefix_len[bi], d_seq_len[bi]
+                if l >= r:  # No useful draft tokens
+                    continue
+                d_ids[bi] = draft["output_ids"][bi, 0, l:r].tolist()
 
-        except RuntimeError as e:
-            logging.error("RuntimeError: %s", e)
-            # TODO: return dictionary with a proper error reporting
-            output = {"generation": f"RuntimeError: {e}", "num_generated_tokens": 10, "generation_time": 0}
+            target = self.target_runner.generate(
+                batch_input_ids=prefix,
+                draft_tokens_list=d_ids,
+                max_new_tokens=draft_len + 1,
+                end_id=self.end_id,
+                pad_id=self.pad_id,
+                temperature=temperature,
+                top_k=top_k,
+                top_p=top_p,
+                top_p_min=top_p_min,
+                repetition_penalty=repetition_penalty,
+                random_seed=random_seed,
+                output_log_probs=bool(top_logprobs is not None),
+                input_lengths=input_lengths,
+                return_dict=True,
+                output_sequence_lengths=True,
+                streaming=False,
+                timeout=self.timeout,
+            )
 
-        return output
+            t_ids = [None] * input_batch_size
+            t_seq_ids = [None] * input_batch_size
+            t_seq_len = target["sequence_lengths"][:, 0].tolist()
+            t_len = [t_seq_len[bi] - prefix_len[bi] for bi in range(input_batch_size)]
+
+            # Update output and tokens for next iteration
+            for bi in range(input_batch_size):
+                gbi = 1
+                l = prefix_len[bi]
+                r = min(t_seq_len[bi], max_seq_len[gbi])
+                t_ids[bi] = target["output_ids"][bi, 0, l:r].tolist()
+                t_seq_ids[bi] = target["output_ids"][bi, 0, :r]
+                outputs["output_ids"][gbi, 0, l:r] = torch.IntTensor(t_ids[bi])
+                outputs["sequence_lengths"][gbi, 0] = r
+                n_draft_token[gbi] += d_len[bi]
+                length = min(d_len[bi], t_len[bi], max_seq_len[gbi] - prefix_len[bi])
+                res = [d_ids[bi][i] == t_ids[bi][i] for i in range(length)]
+                n_accept_token[gbi] += ((~torch.BoolTensor(res)).cumsum(axis=-1) < 1).sum()
+
+            # Evaluate stop criteria and prepare inputs for next iteration
+            prefix_next = []
+            batch_slot_next = []
+            for bi in range(input_batch_size):
+                gbi = 1
+                # Stop due to output length
+                if len(t_seq_ids[bi]) >= max_seq_len[gbi]:
+                    continue  # No need to update for the stopped requests
+                # Stop due to the same output. Normally target should return 1 more token.
+                # if (d_ids is not None and np.array_equal(d_ids[bi], t_ids[bi])):
+                #     continue
+                # Stop due to no change (hit early stopping)
+                if np.array_equal(t_seq_ids[bi].cpu().numpy(), prefix[bi].cpu().numpy()):
+                    continue
+                # Stop due to end words
+                if self.end_id in t_seq_ids[bi][prefix_len[bi] :]:
+                    continue
+                # TODO: Check bad words and stop words criteria
+                prefix_next.append(t_seq_ids[bi])
+                batch_slot_next.append(gbi)
+            prefix = prefix_next
+            if len(prefix) == 0:  # Leave while loop if no request remained
+                break
+
+        logging.info(f"Count of iteration(s): {n_iteration}")
+        logging.info(f"Acceptance ratio:")
+        for i, (a, d) in enumerate(zip(n_accept_token, n_draft_token)):
+            logging.info(f"Request {i}: {a / d * 100 :6.2f}%")
+
+        out_string, out_tokens, num_generated_tokens = get_output(
+            outputs['output_ids'][0, 0], input_lengths[0], outputs['sequence_lengths'][0], self.tokenizer, self.end_id
+        )
+
+        result = {
+            'generation': out_string,
+            'num_generated_tokens': num_generated_tokens,
+            'generation_time': 0,
+        }
+
+        return result
 
     @torch.no_grad()
     def start_generation(self, data: Dict[str, Any]) -> Dict[str, Any]:
@@ -646,7 +746,8 @@ class GetGenerationRequest(BaseModel):
 class MPIWrapper:
     def __init__(
         self,
-        model_path: str,
+        target_model_path: str,
+        draft_model_path: str,
         max_batch_size: Optional[int] = None,
         max_input_len: Optional[int] = None,
         max_output_len: Optional[int] = None,
@@ -658,7 +759,8 @@ class MPIWrapper:
         self.comm = MPI.COMM_WORLD
         self.rank = self.comm.Get_rank()
         self.model = TensorRTLLM(
-            model_path=model_path,
+            target_model_path=target_model_path,
+            draft_model_path=draft_model_path,
             max_batch_size=max_batch_size,
             max_input_len=max_input_len,
             max_output_len=max_output_len,
@@ -667,6 +769,7 @@ class MPIWrapper:
             timeout_seconds=timeout_seconds,
             disable_chunked_context=disable_chunked_context,
         )
+
         self.app = None
         if self.rank == 0:
             self.app = self._create_app()
@@ -758,7 +861,8 @@ class MPIWrapper:
 
 def main():
     parser = ArgumentParser()
-    parser.add_argument("--model_path", required=True)
+    parser.add_argument("--target_model_path", required=True)
+    parser.add_argument("--draft_model_path", required=True)
     parser.add_argument("--host", type=str, default="0.0.0.0")
     parser.add_argument("--port", type=int, default=5000)
     parser.add_argument("--max_batch_size", type=int, default=None, help="Maximum batch size")
@@ -775,7 +879,8 @@ def main():
     args = parser.parse_args()
 
     wrapper = MPIWrapper(
-        model_path=args.model_path,
+        target_model_path=args.target_model_path,
+        draft_model_path=args.draft_model_path,
         max_batch_size=args.max_batch_size,
         max_input_len=args.max_input_len,
         max_output_len=args.max_output_len,
