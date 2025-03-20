@@ -54,8 +54,8 @@ def parse_input(input_texts: str, tokenizer):
         )
         for input_text in input_texts
     ]
-    batch_input_ids = [torch.tensor(x, dtype=torch.int32).unsqueeze(0) for x in batch_input_ids]
-    input_lengths = [x.size(1) for x in batch_input_ids]
+    batch_input_ids = [torch.tensor(x, dtype=torch.int32) for x in batch_input_ids]
+    input_lengths = [x.size(0) for x in batch_input_ids]
 
     return batch_input_ids, input_lengths
 
@@ -491,13 +491,20 @@ class TensorRTLLM:
             max_input_len=max_input_len,
             max_output_len=max_output_len,
             max_beam_width=max_beam_width,
-            kv_cache_free_gpu_memory_fraction=kv_cache_free_gpu_memory_fraction,
             enable_chunked_context=not disable_chunked_context,
             kv_cache_enable_block_reuse=True,
         )
 
-        self.target_runner = ModelRunnerCpp.from_dir(engine_dir=target_model_path, **runner_kwargs)
-        self.draft_runner = ModelRunnerCpp.from_dir(engine_dir=draft_model_path, **runner_kwargs)
+        self.target_runner = ModelRunnerCpp.from_dir(
+            engine_dir=target_model_path,
+            kv_cache_free_gpu_memory_fraction=kv_cache_free_gpu_memory_fraction * 0.9,
+            **runner_kwargs,
+        )
+        self.draft_runner = ModelRunnerCpp.from_dir(
+            engine_dir=draft_model_path,
+            kv_cache_free_gpu_memory_fraction=kv_cache_free_gpu_memory_fraction * 0.1,
+            **runner_kwargs,
+        )
 
         self.timeout = timeout_seconds
 
@@ -520,9 +527,13 @@ class TensorRTLLM:
         stop_words_list,
         top_logprobs,
     ):
+        if top_p_min == 0.0:
+            top_p_min = None
         # TODO: pass as param
-        draft_len = 4
+        draft_len = 10
 
+        num_tokens_to_check = 20
+        start_time = time.time()
         prefix = batch_input_ids
         input_batch_size = len(batch_input_ids)  # Note as `BS`
         beam_width = 1  # Note as `BW`
@@ -544,7 +555,7 @@ class TensorRTLLM:
             n_iteration += 1
             draft = self.draft_runner.generate(
                 prefix,
-                max_new_tokens=max_output_token,
+                max_new_tokens=draft_len,
                 end_id=self.end_id,
                 pad_id=self.pad_id,
                 temperature=temperature,
@@ -600,7 +611,7 @@ class TensorRTLLM:
 
             # Update output and tokens for next iteration
             for bi in range(input_batch_size):
-                gbi = 1
+                gbi = 0
                 l = prefix_len[bi]
                 r = min(t_seq_len[bi], max_seq_len[gbi])
                 t_ids[bi] = target["output_ids"][bi, 0, l:r].tolist()
@@ -616,7 +627,7 @@ class TensorRTLLM:
             prefix_next = []
             batch_slot_next = []
             for bi in range(input_batch_size):
-                gbi = 1
+                gbi = 0
                 # Stop due to output length
                 if len(t_seq_ids[bi]) >= max_seq_len[gbi]:
                     continue  # No need to update for the stopped requests
@@ -629,26 +640,56 @@ class TensorRTLLM:
                 # Stop due to end words
                 if self.end_id in t_seq_ids[bi][prefix_len[bi] :]:
                     continue
-                # TODO: Check bad words and stop words criteria
+
+                seq_length = outputs['sequence_lengths']
+                generation_suffix = outputs['output_ids'][0, 0, seq_length[0] - num_tokens_to_check : seq_length[0]]
+                out_string = get_output(generation_suffix, 0, num_tokens_to_check, self.tokenizer, self.end_id)[0]
+                for stop_word in stop_words_list:
+                    if stop_word in out_string:
+                        matching_stop_word = stop_word
+                        break
+
+                if matching_stop_word is not None:
+                    break
+
+                if self.timeout:
+                    current_time = time.time() - start_time
+                    if current_time >= self.timeout:
+                        break
+
                 prefix_next.append(t_seq_ids[bi])
                 batch_slot_next.append(gbi)
             prefix = prefix_next
             if len(prefix) == 0:  # Leave while loop if no request remained
                 break
 
-        logging.info(f"Count of iteration(s): {n_iteration}")
-        logging.info(f"Acceptance ratio:")
-        for i, (a, d) in enumerate(zip(n_accept_token, n_draft_token)):
-            logging.info(f"Request {i}: {a / d * 100 :6.2f}%")
+        print(f"Acceptance ratio: {n_accept_token[0] / n_draft_token[0] * 100 :6.2f}%")
 
         out_string, out_tokens, num_generated_tokens = get_output(
             outputs['output_ids'][0, 0], input_lengths[0], outputs['sequence_lengths'][0], self.tokenizer, self.end_id
         )
+        # TODO: the number of tokens is not exact, because we might trim the output a bit,
+        #       but close enough for practical purposes
+        for stop_word in stop_words_list:
+            if stop_word in out_string:
+                matching_stop_word = stop_word
+                break
+        if matching_stop_word is not None:
+            out_string = trim_after_stop_phrases(out_string, stop_words_list)
+            # adding it back, since we only need to remove what's *after* the stop phrase
+            out_string += matching_stop_word
+        else:
+            # trtllm removes end id if it was the stop reason
+            # this is a hack to add it back, but we are going to include it even when
+            # it was not generated by the model e.g. if we stopped due to max tokens
+            out_string += self.tokenizer.decode(self.end_id)
+
+        generation_time = int(round(time.time() - start_time))
 
         result = {
             'generation': out_string,
             'num_generated_tokens': num_generated_tokens,
-            'generation_time': 0,
+            'generation_time': generation_time,
         }
 
         return result
@@ -861,7 +902,7 @@ class MPIWrapper:
 
 def main():
     parser = ArgumentParser()
-    parser.add_argument("--target_model_path", required=True)
+    parser.add_argument("--model_path", required=True)
     parser.add_argument("--draft_model_path", required=True)
     parser.add_argument("--host", type=str, default="0.0.0.0")
     parser.add_argument("--port", type=int, default=5000)
@@ -873,20 +914,20 @@ def main():
         "--timeout_seconds", type=int, default=None, help="No session should take longer than the timeout"
     )
     parser.add_argument(
-        "--kv_cache_free_gpu_memory_fraction", type=float, default=None, help="Free GPU memory fraction for cache"
+        "--kv_cache_free_gpu_memory_fraction", type=float, default=0.9, help="Free GPU memory fraction for cache"
     )
     parser.add_argument("--disable_chunked_context", action="store_true", help="Disable chunked context")
     args = parser.parse_args()
 
     wrapper = MPIWrapper(
-        target_model_path=args.target_model_path,
+        target_model_path=args.model_path,
         draft_model_path=args.draft_model_path,
         max_batch_size=args.max_batch_size,
         max_input_len=args.max_input_len,
         max_output_len=args.max_output_len,
         max_beam_width=args.max_beam_width,
         timeout_seconds=args.timeout_seconds,
-        kv_cache_free_gpu_memory_fraction=args.kv_cache_free_gpu_memory_fraction,
+        kv_cache_free_gpu_memory_fraction=0.2,
         disable_chunked_context=args.disable_chunked_context,
     )
     wrapper.run(host=args.host, port=args.port)

@@ -373,7 +373,7 @@ def get_server_command(
     else:
         # need this flag for stable Nemotron-4-340B deployment
         server_start_cmd = (
-            f"FORCE_NCCL_ALL_REDUCE_STRATEGY=1 python -m nemo_skills.inference.server.serve_trt "
+            f"python -m nemo_skills.inference.server.serve_trt_dtm "
             f"    --model_path {model_path} "
             f"    --port {server_port} "
             f"    {server_args} "
