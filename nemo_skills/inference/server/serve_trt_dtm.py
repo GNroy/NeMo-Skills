@@ -13,27 +13,27 @@
 # limitations under the License.
 
 import asyncio
-import copy
 import logging
 import re
 import sys
+import threading
 import time
 import uuid
 from argparse import ArgumentParser
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from typing import Any, Dict, List, Optional
 
 import numpy as np
 import tensorrt_llm
-import tensorrt_llm.bindings.executor as trtllm
 import torch
 from fastapi import FastAPI, HTTPException
 from mpi4py import MPI
 from pydantic import BaseModel
-from tensorrt_llm.runtime.model_runner_cpp import ExternalDraftTokensConfig, ModelRunnerCpp
+from tensorrt_llm.runtime.model_runner_cpp import ModelRunnerCpp
 from transformers import AutoTokenizer
 
-app = FastAPI(title="TensorRT-LLM Server")
+app = FastAPI(title="TensorRT-LLM Server for DTM")
 
 
 # keeping it here to make this file self-contained. This is duplicated from model.py
@@ -131,6 +131,34 @@ class TensorRTLLM:
         self.active_generations = {}
         self.executor = ThreadPoolExecutor(max_workers=1024)
 
+        # Added locking mechanism for engines
+        self.engine_condition = threading.Condition()
+        self.draft_active = 0
+        self.target_active = 0
+
+    @contextmanager
+    def _engine_lock(self, engine_type: str):
+        with self.engine_condition:
+            if engine_type == "draft":
+                while self.target_active > 0:
+                    self.engine_condition.wait()
+                self.draft_active += 1
+            elif engine_type == "target":
+                while self.draft_active > 0:
+                    self.engine_condition.wait()
+                self.target_active += 1
+            else:
+                raise ValueError("Invalid engine type")
+        try:
+            yield
+        finally:
+            with self.engine_condition:
+                if engine_type == "draft":
+                    self.draft_active -= 1
+                else:
+                    self.target_active -= 1
+                self.engine_condition.notify_all()
+
     def get_output(
         self,
         batch_input_ids,
@@ -171,25 +199,24 @@ class TensorRTLLM:
 
         while True:
             n_iteration += 1
-            print("HERE")
-            draft = self.draft_runner.generate(
-                prefix,
-                max_new_tokens=draft_len,
-                end_id=self.end_id,
-                pad_id=self.pad_id,
-                temperature=temperature,
-                top_k=top_k,
-                top_p=top_p,
-                top_p_min=top_p_min,
-                repetition_penalty=repetition_penalty,
-                random_seed=random_seed,
-                output_log_probs=bool(top_logprobs is not None),
-                input_lengths=input_lengths,
-                return_dict=True,
-                output_sequence_lengths=True,
-                streaming=False,
-            )
-            print("THERE")
+            with self._engine_lock("draft"):
+                draft = self.draft_runner.generate(
+                    prefix,
+                    max_new_tokens=draft_len,
+                    end_id=self.end_id,
+                    pad_id=self.pad_id,
+                    temperature=temperature,
+                    top_k=top_k,
+                    top_p=top_p,
+                    top_p_min=top_p_min,
+                    repetition_penalty=repetition_penalty,
+                    random_seed=random_seed,
+                    output_log_probs=bool(top_logprobs is not None),
+                    input_lengths=input_lengths,
+                    return_dict=True,
+                    output_sequence_lengths=True,
+                    streaming=False,
+                )
             prefix_len = [len(prefix[i]) for i in range(input_batch_size)]
             # draft["output_ids"].shape -> [BS, BW, maxSL]
             # draft["sequence_lengths"].shape -> [BS, BW]
@@ -202,26 +229,25 @@ class TensorRTLLM:
                 if l >= r:  # No useful draft tokens
                     continue
                 d_ids[bi] = draft["output_ids"][bi, 0, l:r].tolist()
-            print("HERE2")
-            target = self.target_runner.generate(
-                batch_input_ids=prefix,
-                draft_tokens_list=d_ids,
-                max_new_tokens=draft_len + 1,
-                end_id=self.end_id,
-                pad_id=self.pad_id,
-                temperature=temperature,
-                top_k=top_k,
-                top_p=top_p,
-                top_p_min=top_p_min,
-                repetition_penalty=repetition_penalty,
-                random_seed=random_seed,
-                output_log_probs=bool(top_logprobs is not None),
-                input_lengths=input_lengths,
-                return_dict=True,
-                output_sequence_lengths=True,
-                streaming=False,
-            )
-            print("THERE2")
+            with self._engine_lock("target"):
+                target = self.target_runner.generate(
+                    batch_input_ids=prefix,
+                    draft_tokens_list=d_ids,
+                    max_new_tokens=draft_len + 1,
+                    end_id=self.end_id,
+                    pad_id=self.pad_id,
+                    temperature=temperature,
+                    top_k=top_k,
+                    top_p=top_p,
+                    top_p_min=top_p_min,
+                    repetition_penalty=repetition_penalty,
+                    random_seed=random_seed,
+                    output_log_probs=bool(top_logprobs is not None),
+                    input_lengths=input_lengths,
+                    return_dict=True,
+                    output_sequence_lengths=True,
+                    streaming=False,
+                )
             t_ids = [None] * input_batch_size
             t_seq_ids = [None] * input_batch_size
             t_seq_len = target["sequence_lengths"][:, 0].tolist()
