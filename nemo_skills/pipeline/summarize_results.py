@@ -250,6 +250,9 @@ def summarize_results(
     except PermissionError:
         print(f"Could not save metrics.json to {Path(results_dir) / 'metrics.json'}. Please check the permissions.")
 
+    print('majority@32:', int(results['nvmath-mod']['majority@32']['symbolic_correct'] * 50 / 100))
+    print('majority@24:', int(results['nvmath-mod']['majority@24']['symbolic_correct'] * 50 / 100))
+    print('majority@20:', int(results['nvmath-mod']['majority@20']['symbolic_correct'] * 50 / 100))
     print('majority@16:', int(results['nvmath-mod']['majority@16']['symbolic_correct'] * 50 / 100))
     print('majority@12:', int(results['nvmath-mod']['majority@12']['symbolic_correct'] * 50 / 100))
     print('majority@8:', int(results['nvmath-mod']['majority@8']['symbolic_correct'] * 50 / 100))
