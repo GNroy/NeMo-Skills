@@ -250,6 +250,10 @@ def summarize_results(
     except PermissionError:
         print(f"Could not save metrics.json to {Path(results_dir) / 'metrics.json'}. Please check the permissions.")
 
+    print('majority@16:', int(results['nvmath-mod']['majority@16']['symbolic_correct'] * 50 / 100))
+    print('majority@12:', int(results['nvmath-mod']['majority@12']['symbolic_correct'] * 50 / 100))
+    print('majority@8:', int(results['nvmath-mod']['majority@8']['symbolic_correct'] * 50 / 100))
+
     # syncing to wandb if asked
     if wandb_name is not None:
         import wandb
