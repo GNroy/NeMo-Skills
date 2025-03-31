@@ -162,6 +162,11 @@ class MathMetrics(BaseMetrics):
                     ]
 
                     majority_result = Counter(valid_answers_and_results).most_common(1)[0][0]
+                    # two_most_common = Counter(valid_answers_and_results).most_common(2)
+                    # if len(two_most_common) > 1 and two_most_common[0][1] == two_most_common[1][1]:
+                    #     # If there is a tie, we consider it as no answer
+                    #      print(two_most_common)
+
                     return majority_result[1], False
 
                 if self.has_sympy:
