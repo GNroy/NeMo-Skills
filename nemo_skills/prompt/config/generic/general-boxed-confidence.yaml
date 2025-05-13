@@ -13,6 +13,6 @@ system: ""
 
 user: |-
   Solve the following problem. Make sure to put the answer (and only answer) inside \boxed{{}}.
-  After answering, provide a confidence for the answer as either "high" or "low", where "high" means you are confident that your answer is correct and "low" means you are not sure you have found the correct answer. Make sure to put the confidence (and only confidence) inside \confidence{{}}.
+  Before putting the answer inside \boxed{{}}, indicate the level of confidence in your answer as "**Confidence**: High" or "**Confidence**: Low". "High" confidence means you are confident that your answer is correct and "Low" means you are not sure you have found the correct answer.
 
   {examples}{problem}
