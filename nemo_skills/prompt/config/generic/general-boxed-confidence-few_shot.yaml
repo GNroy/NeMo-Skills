@@ -12,18 +12,17 @@ user: |-
     B) 5 m/s²
     C) 10 m/s²
     D) 0.2 m/s²
-  Answer: \boxed{B}
+  Answer: \\boxed{{B}}
   **Confidence**: High
 
   Example:
   Problem:
   What is the primary mechanism responsible for the generation of fast radio bursts (FRBs)?
-    a) Colliding neutron stars
-    b) Magnetar hyperflares
-    c) Extraterrestrial communication
-    d) Primordial black hole evaporation
-
-  Answer: \boxed{b}
+    A) Colliding neutron stars
+    B) Magnetar hyperflares
+    C) Extraterrestrial communication
+    D) Primordial black hole evaporation
+  Answer: \\boxed{{B}}
   **Confidence**: Low
 
   {problem}
