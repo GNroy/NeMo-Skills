@@ -1,0 +1,29 @@
+# prompt for any benchmarks evaluated with boxed (e.g. math, mmlu-pro, gpqa)
+
+system: ""
+
+user: |-
+  Solve the following problem. Make sure to put the answer (and only answer) inside \boxed{{}}.
+  Provide a confidence for the answer in the format "**Confidence**: High" or "**Confidence**: Low". "High" confidence means you are confident that your answer is correct and "Low" means you are not sure you have found the correct answer. Follow the format exactly as prompted.
+
+  Example:
+  Problem: A 10 kg object experiences a net force of 50 N. What is the magnitude of its acceleration?
+    A) 2 m/s²
+    B) 5 m/s²
+    C) 10 m/s²
+    D) 0.2 m/s²
+  Answer: \boxed{B}
+  **Confidence**: High
+
+  Example:
+  Problem:
+  What is the primary mechanism responsible for the generation of fast radio bursts (FRBs)?
+    a) Colliding neutron stars
+    b) Magnetar hyperflares
+    c) Extraterrestrial communication
+    d) Primordial black hole evaporation
+
+  Answer: \boxed{b}
+  **Confidence**: Low
+
+  {problem}
