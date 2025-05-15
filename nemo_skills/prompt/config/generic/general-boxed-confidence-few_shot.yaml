@@ -12,8 +12,9 @@ user: |-
     B) 5 m/s²
     C) 10 m/s²
     D) 0.2 m/s²
-  Answer: \\boxed{{B}}
+  Predicted answer: B
   **Confidence**: High
+  \\boxed{{B}}
 
   Example:
   Problem:
@@ -22,7 +23,8 @@ user: |-
     B) Magnetar hyperflares
     C) Extraterrestrial communication
     D) Primordial black hole evaporation
-  Answer: \\boxed{{B}}
+  Predicted answer: B
   **Confidence**: Low
+  \\boxed{{B}}
 
   {problem}
