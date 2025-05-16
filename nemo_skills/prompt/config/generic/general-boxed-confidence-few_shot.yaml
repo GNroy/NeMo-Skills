@@ -1,30 +1,33 @@
 # prompt for any benchmarks evaluated with boxed (e.g. math, mmlu-pro, gpqa)
 
+  # Example problem: A 10 kg object experiences a net force of 50 N. What is the magnitude of its acceleration?
+  #   A) 2 m/s²
+  #   B) 5 m/s²
+  #   C) 10 m/s²
+  #   D) 0.2 m/s²
+  # Predicted answer: B
+  # **Confidence**: High
+  # \\boxed{{B}}
+
+  # Example problem:
+  # What is the primary mechanism responsible for the generation of fast radio bursts (FRBs)?
+  #   A) Colliding neutron stars
+  #   B) Magnetar hyperflares
+  #   C) Extraterrestrial communication
+  #   D) Primordial black hole evaporation
+  # Predicted answer: B
+  # **Confidence**: Low
+  # \\boxed{{B}}
+
 system: ""
 
 user: |-
   Solve the following problem. Make sure to put the answer (and only answer) inside \boxed{{}}.
-  Provide a confidence for the answer in the format "**Confidence**: High" or "**Confidence**: Low". "High" confidence means you are confident that your answer is correct and "Low" means you are not sure you have found the correct answer. Follow the format exactly as prompted.
+  Provide a confidence for the answer in the format "Confidence: High" or "Confidence: Low". "High" confidence means you are confident that your answer is correct and "Low" means you are not sure you have found the correct answer.
 
-  Example:
-  Problem: A 10 kg object experiences a net force of 50 N. What is the magnitude of its acceleration?
-    A) 2 m/s²
-    B) 5 m/s²
-    C) 10 m/s²
-    D) 0.2 m/s²
-  Predicted answer: B
-  **Confidence**: High
-  \\boxed{{B}}
-
-  Example:
-  Problem:
-  What is the primary mechanism responsible for the generation of fast radio bursts (FRBs)?
-    A) Colliding neutron stars
-    B) Magnetar hyperflares
-    C) Extraterrestrial communication
-    D) Primordial black hole evaporation
-  Predicted answer: B
-  **Confidence**: Low
-  \\boxed{{B}}
+  Your response should be in the following format:
+  Explanation: {{your explanation for your final answer}}
+  Answer: {{your succinct, final answer in \boxed{{}} format}}
+  Confidence: {{your confidence in your answer, either "High" or "Low"}}
 
   {problem}
