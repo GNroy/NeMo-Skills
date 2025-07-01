@@ -22,7 +22,7 @@
 system: ""
 
 user: |-
-  Solve the following problem. Make sure to put the answer (and only answer) inside \boxed{{}}.
+  Solve the following problem. Make sure to put the answer letter (and only the answer letter) inside \boxed{{}}.
   Provide a confidence for the answer in the format "Confidence: High" or "Confidence: Low". "High" confidence means you are confident that your answer is correct and "Low" means you are not sure you have found the correct answer.
 
   Your response should be in the following format:
