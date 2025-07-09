@@ -1,18 +1,15 @@
 # prompt for any benchmarks evaluated with boxed (e.g. math, mmlu-pro, gpqa)
 
-few_shot_examples:
-  prefix: "Here are some examples of problems and solutions you can refer to.\n\n"
-  template: "Problem:\n{problem}\n\nSolution:\n{solution}\n\n\n\n\n\n"
-  suffix: "Here is the problem you need to solve:\n"
-  # this is built as <prefix>{template.format(example1)}{template.format(example2)}...{template.format(exampleN)}<suffix>
-  # and available as {examples} key in the final prompt
-  # if examples_type is not specified, then {examples} will be empty
-  # by default there are no examples, but can be changed from code/cmd
-
 system: ""
 
 user: |-
-  Solve the following problem. Make sure to put the answer (and only answer) inside \boxed{{}}.
-  Provide a confidence for the answer in the format "**Confidence**: High" or "**Confidence**: Low". "High" confidence means you are confident that your answer is correct and "Low" means you are not sure you have found the correct answer. Follow the format exactly as prompted.
+  Solve the following problem. Make sure to put the answer letter (and only the answer letter) inside \boxed{{}}.
+  Provide a confidence for the answer in the format "Confidence: High" or "Confidence: Low". "High" confidence means you are confident that your answer is correct and "Low" means you are not sure you have found the correct answer.
+  Discuss your confidence and put your confidence reasoning in the Explanation section inside <confidence>{{your confidence reasoning}}</confidence> tags.
 
-  {examples}{problem}
+  Your response should be in the following format:
+  Explanation: {{your explanation for your final answer and your confidence reasoning inside <confidence> tags}}
+  Answer: {{your succinct, final answer in \boxed{{}} format}}
+  Confidence: {{your confidence in your answer, either "High" or "Low"}}
+
+  {problem}
