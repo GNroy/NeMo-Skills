@@ -24,27 +24,57 @@ from nemo_skills.utils import get_logger_name, unroll_files
 LOG = logging.getLogger(get_logger_name(__file__))
 
 
-def eval_mcq(cfg):
-    def extract_letter(text):
-        # extract prediction from boxed{}
-        parsed = extract_answer(text)
-        if parsed is not None and len(parsed) != 1:
-            match = re.findall(r"\b[A-J]\b(?!.*\b[A-J]\b)", parsed, re.DOTALL)
-            if len(match) > 0:
-                parsed = match[-1].strip()
+def extract_letter(text):
+    # extract prediction from boxed{}
+    parsed = extract_answer(text)
+    if parsed is not None and len(parsed) != 1:
+        match = re.findall(r"\b[A-J]\b(?!.*\b[A-J]\b)", parsed, re.DOTALL)
+        if len(match) > 0:
+            parsed = match[-1].strip()
 
-        # adapted from https://artificialanalysis.ai/methodology/intelligence-benchmarking#intelligence-index-evaluation-suite-overview
-        if parsed is None:
-            match = re.findall(r"(?i)[\*\_]{0,2}Answer[\*\_]{0,2}\s*:[\s\*\_]{0,2}\s*([A-Z])(?![a-zA-Z0-9])", text)
-            if match:
-                parsed = match[-1].strip()
-        return parsed
+    # adapted from https://artificialanalysis.ai/methodology/intelligence-benchmarking#intelligence-index-evaluation-suite-overview
+    if parsed is None:
+        match = re.findall(r"(?i)[\*\_]{0,2}Answer[\*\_]{0,2}\s*:[\s\*\_]{0,2}\s*([A-Z])(?![a-zA-Z0-9])", text)
+        if match:
+            parsed = match[-1].strip()
+    return parsed
+
+
+def eval_mcq(cfg):
+    for file in unroll_files(cfg.input_files):
+        with open(file, 'rt', encoding='utf-8') as fin:
+            data = [json.loads(line) for line in fin]
+        with open(file, 'wt', encoding='utf-8') as fout:
+            for sample in tqdm(data):
+                sample['predicted_answer'] = extract_letter(sample["generation"])
+                sample['symbolic_correct'] = sample['predicted_answer'] == sample['expected_answer']
+                fout.write(json.dumps(sample) + "\n")
+
+
+def eval_mcq_confidence(cfg):
+    # confidence helper functions
+    def extract_confidence(text):
+        # extract confidence from text
+        match = re.findall(r"(?i)[\*\_]{0,2}Confidence[\*\_]{0,2}\s*:[\s\*\_]{0,2}\s*(\w+)", text)
+        if match:
+            return match[-1].strip()
+        return None
+    confidence_adequate = lambda x, y: (x == "high") and y['symbolic_correct'] or (x == "low") and not y['symbolic_correct']
 
     for file in unroll_files(cfg.input_files):
         with open(file, "rt", encoding="utf-8") as fin:
             data = [json.loads(line) for line in fin]
         with open(file, "wt", encoding="utf-8") as fout:
             for sample in tqdm(data):
-                sample["predicted_answer"] = extract_letter(sample["generation"])
-                sample["symbolic_correct"] = sample["predicted_answer"] == sample["expected_answer"]
+                sample['predicted_answer'] = extract_letter(sample["generation"])
+                sample['symbolic_correct'] = sample['predicted_answer'] == sample['expected_answer']
+                # confidence extraction
+                confidence = extract_confidence(sample["generation"])
+                if confidence:
+                    confidence = confidence.lower()
+                    sample['confidence'] = confidence
+                    sample['confidence_adequate'] = confidence_adequate(confidence, sample)
+                else:
+                    sample['confidence'] = None
+                    sample['confidence_adequate'] = False
                 fout.write(json.dumps(sample) + "\n")
