@@ -77,4 +77,5 @@ def eval_mcq_confidence(cfg):
                 else:
                     sample['confidence'] = None
                     sample['confidence_adequate'] = False
+                sample['reward_model_score'] = int(sample['confidence_adequate'] and sample['symbolic_correct'])
                 fout.write(json.dumps(sample) + "\n")
