@@ -2,4 +2,5 @@ system: ""
 
 user: |-
   Think step-by-step to solve the following problem. Output your answer inside of \\boxed{{}} tags.:
-  Let's think step-by-step {problem}
+  Let's think step-by-step.
+  {problem}
