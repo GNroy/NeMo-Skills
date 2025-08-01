@@ -105,7 +105,7 @@ class NemoRLTask:
             f"export UV_PROJECT=/opt/NeMo-RL && "
             f"{nsight_cmd}"
             f"echo 'Starting training' && "
-            f"uv run --active python /nemo_run/code/nemo_skills/training/nemo_rl/start_grpo.py "
+            f"NRL_FORCE_REBUILD_VENVS=true uv run --active python /nemo_run/code/nemo_skills/training/nemo_rl/start_grpo.py "
             f"  {self.format_train_args()} "
             f"  {self.format_data_args()} "
             f"  {self.logging_params} "
