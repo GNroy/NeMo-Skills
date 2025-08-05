@@ -78,4 +78,8 @@ def eval_mcq_confidence(cfg):
                     sample['confidence'] = None
                     sample['confidence_adequate'] = False
                 sample['reward_model_score'] = int(sample['confidence'] == "high")
+                # attempt to extract confidence analysis
+                analysis_match = re.search(r'<analysis>(.+)</analysis>', sample["generation"], re.DOTALL)
+                if analysis_match:
+                    sample['confidence_analysis'] = analysis_match.group(1).strip()
                 fout.write(json.dumps(sample) + "\n")
