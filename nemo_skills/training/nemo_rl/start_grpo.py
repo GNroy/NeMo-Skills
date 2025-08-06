@@ -24,6 +24,8 @@ from collections import defaultdict
 from dataclasses import dataclass
 from typing import Any, Optional
 
+import torch
+
 from nemo_rl.algorithms.grpo import MasterConfig, grpo_train, setup
 from nemo_rl.algorithms.utils import get_tokenizer
 from nemo_rl.data import DataConfig
@@ -143,6 +145,44 @@ class NSTaskDataSpec(TaskDataSpec):
     prompt_spec: dict[str, Any] | None = None
 
 
+def apply_ns_chat_template(prompt, datum_dict) -> str:
+    return prompt.fill(datum_dict, return_templated_dict=True)
+
+
+def remove_duplicate_bos_tokens(token_ids: torch.Tensor, tokenizer: TokenizerType) -> torch.Tensor:
+    """Remove duplicate BOS tokens from the beginning of token sequences.
+    
+    Args:
+        token_ids: Tensor of token IDs
+        tokenizer: Tokenizer instance
+        
+    Returns:
+        Token IDs with duplicate BOS tokens removed
+    """
+    # Check if tokenizer has bos_token_id attribute and it's not None
+    if not hasattr(tokenizer, 'bos_token_id') or tokenizer.bos_token_id is None:
+        print(f"🔧 [BOS FIX] Tokenizer {getattr(tokenizer, 'name_or_path', 'unknown')} has no BOS token or bos_token_id attribute. Skipping duplicate BOS check.")
+        return token_ids
+    
+    token_ids_list = token_ids.tolist()
+    
+    # Check if we have at least 2 tokens and both are BOS
+    if len(token_ids_list) > 1 and token_ids_list[0] == tokenizer.bos_token_id and token_ids_list[1] == tokenizer.bos_token_id:
+        # Log the detection and removal
+        print(f"🔧 [BOS FIX] Detected double BOS tokens at start of sequence. Removing duplicate.")
+        print(f"    Tokenizer: {getattr(tokenizer, 'name_or_path', 'unknown')}")
+        print(f"    BOS token ID: {tokenizer.bos_token_id}")
+        print(f"    Original first 5 tokens: {token_ids_list[:5]}")
+        
+        # Remove the first BOS token (keep the second one)
+        fixed_token_ids = torch.tensor(token_ids_list[1:], dtype=token_ids.dtype, device=token_ids.device)
+        
+        print(f"    Fixed first 5 tokens: {fixed_token_ids.tolist()[:5]}")
+        return fixed_token_ids
+    
+    return token_ids
+
+
 # TaskDataProcessFnCallable
 def ns_data_processor(
     datum_dict: dict[str, Any],
@@ -160,17 +200,13 @@ def ns_data_processor(
         examples_type=prompt_spec["examples_type"],
         config_dir=prompt_spec["config_dir"],
     )
-    # we need to include system message here as roles are only used for masking
-    # so prompt.fill can return a combined system + user message
-    # if we use separate, it will have double BOS in the tokens!
-    user_message = prompt.fill(datum_dict)
-    message_log = [
-        {
-            "role": "user",
-            "content": user_message,
-            "token_ids": tokenizer([user_message], return_tensors="pt", add_special_tokens=False)["input_ids"][0],
-        }
-    ]
+    message_log = apply_ns_chat_template(prompt, datum_dict)
+
+    for message in message_log:
+        # Tokenize the message content
+        token_ids = tokenizer([message['content']], return_tensors="pt")["input_ids"][0]
+        # Apply BOS token duplicate removal fix
+        message["token_ids"] = remove_duplicate_bos_tokens(token_ids, tokenizer)
 
     length = sum(len(m["token_ids"]) for m in message_log)
 
