@@ -149,7 +149,7 @@ def apply_ns_chat_template(prompt, datum_dict) -> str:
     return prompt.fill(datum_dict, return_templated_dict=True)
 
 
-def remove_duplicate_bos_tokens(token_ids: torch.Tensor, tokenizer: TokenizerType) -> torch.Tensor:
+def remove_duplicate_bos_tokens(token_ids: torch.Tensor, tokenizer: TokenizerType) -> tuple[torch.Tensor, bool]:
     """Remove duplicate BOS tokens from the beginning of token sequences.
     
     Args:
@@ -157,31 +157,25 @@ def remove_duplicate_bos_tokens(token_ids: torch.Tensor, tokenizer: TokenizerTyp
         tokenizer: Tokenizer instance
         
     Returns:
-        Token IDs with duplicate BOS tokens removed
+        Tuple of (token IDs with duplicate BOS tokens removed, whether fix was applied)
     """
     # Check if tokenizer has bos_token_id attribute and it's not None
     if not hasattr(tokenizer, 'bos_token_id') or tokenizer.bos_token_id is None:
-        print(f"🔧 [BOS FIX] Tokenizer {getattr(tokenizer, 'name_or_path', 'unknown')} has no BOS token or bos_token_id attribute. Skipping duplicate BOS check.")
-        return token_ids
+        return token_ids, False
     
     token_ids_list = token_ids.tolist()
     
     # Check if we have at least 2 tokens and both are BOS
     if len(token_ids_list) > 1 and token_ids_list[0] == tokenizer.bos_token_id and token_ids_list[1] == tokenizer.bos_token_id:
-        # Log the detection and removal
-        print(f"🔧 [BOS FIX] Detected double BOS tokens at start of sequence. Removing duplicate.")
-        print(f"    Tokenizer: {getattr(tokenizer, 'name_or_path', 'unknown')}")
-        print(f"    BOS token ID: {tokenizer.bos_token_id}")
-        print(f"    Original first 5 tokens: {token_ids_list[:5]}")
-        
         # Remove the first BOS token (keep the second one)
         fixed_token_ids = torch.tensor(token_ids_list[1:], dtype=token_ids.dtype, device=token_ids.device)
-        
-        print(f"    Fixed first 5 tokens: {fixed_token_ids.tolist()[:5]}")
-        return fixed_token_ids
+        return fixed_token_ids, True
     
-    return token_ids
+    return token_ids, False
 
+
+# Global counter for debug logging
+_debug_samples_logged = 0
 
 # TaskDataProcessFnCallable
 def ns_data_processor(
@@ -202,11 +196,36 @@ def ns_data_processor(
     )
     message_log = apply_ns_chat_template(prompt, datum_dict)
 
+    bos_fixes_applied = 0
+    total_tokens = 0
+    
     for message in message_log:
         # Tokenize the message content
         token_ids = tokenizer([message['content']], return_tensors="pt")["input_ids"][0]
         # Apply BOS token duplicate removal fix
-        message["token_ids"] = remove_duplicate_bos_tokens(token_ids, tokenizer)
+        message["token_ids"], fix_applied = remove_duplicate_bos_tokens(token_ids, tokenizer)
+        if fix_applied:
+            bos_fixes_applied += 1
+        total_tokens += len(message["token_ids"])
+    
+    # Log first 2 dialogs globally for debugging
+    global _debug_samples_logged
+    if _debug_samples_logged < 2:
+        print(f"\n📊 [DIALOG DEBUG] Sample {idx} - Tokenizer: {getattr(tokenizer, 'name_or_path', 'unknown')}")
+        if hasattr(tokenizer, 'bos_token_id') and tokenizer.bos_token_id is not None:
+            print(f"    BOS token ID: {tokenizer.bos_token_id}")
+        print(f"    BOS fixes applied: {bos_fixes_applied}/{len(message_log)} messages")
+        print(f"    Total tokens: {total_tokens}")
+        print(f"    Task: {datum_dict.get('task_name', 'unknown')}")
+        
+        for i, message in enumerate(message_log):
+            role = message.get('role', 'unknown')
+            content = message.get('content', '')[:200] + ('...' if len(message.get('content', '')) > 200 else '')
+            token_ids = message["token_ids"].tolist()
+            print(f"    Message {i+1} [{role}]: \"{content}\"")
+            print(f"      Tokens ({len(token_ids)}): {token_ids[:15]}{'...' if len(token_ids) > 15 else ''}")
+        print()
+        _debug_samples_logged += 1
 
     length = sum(len(m["token_ids"]) for m in message_log)
 
