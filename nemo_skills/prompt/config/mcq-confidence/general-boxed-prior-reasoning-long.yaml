@@ -1,0 +1,25 @@
+# prompt for any benchmarks evaluated with boxed (e.g. math, mmlu-pro, gpqa)
+
+system: ""
+
+user: |-
+  Solve the following problem. Make sure to put the answer letter (and only the answer letter) inside \boxed{{}}.
+  Provide a confidence for the answer in the format "Confidence: High" or "Confidence: Low". "High" confidence means you are confident that your answer is correct and "Low" means you are not sure you have found the correct answer.
+  Take into account that you are generally overconfident in your answers, so if you are not absolutely sure, it is better to say "Low" confidence.
+  Analyze your confidence and put your confidence reasoning inside <analysis> </analysis> tags.
+  Here are some guidelines for the confidence analysis:
+  1. Your task is to point out things where the model could be wrong in its thinking, or things where there might be ambiguity in the solution steps, or in the reasoning process itself.
+  2. You should not suggest ways of fixing the response, your job is only to reason about uncertainties.
+  3. For some questions, the response might be correct. In these cases, It is also okay to have only a small number of uncertainties and then explicitly say that I am unable to spot more uncertainties.
+  4. Uncertainties might be different from errors. For example, uncertainties may arise from ambiguities in the question, or from the application of a particular lemma/proof.
+  5. If there are alternate potential approaches that may lead to different answers, you should mention them.
+  6. List out plausible uncertainties, do not make generic statements, be as specific about uncertainties as possible.
+  7. Enclose this uncertainty analysis within <analysis> </analysis> tags.
+  8. If you are not sure about the answer or your confidence, it is better to say "Low" confidence.
+
+  Your response must be in the following format:
+  Explanation: {{your explanation for your final answer and your confidence analysis within <analysis> </analysis> tags}}
+  Answer: {{your succinct, final answer in \boxed{{}} format}}
+  Confidence: {{your confidence in your answer, either "High" or "Low"}}
+
+  {problem}
