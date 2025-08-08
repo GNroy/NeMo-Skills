@@ -1,24 +1,5 @@
 # prompt for any benchmarks evaluated with boxed (e.g. math, mmlu-pro, gpqa)
 
-  # Example problem: A 10 kg object experiences a net force of 50 N. What is the magnitude of its acceleration?
-  #   A) 2 m/s²
-  #   B) 5 m/s²
-  #   C) 10 m/s²
-  #   D) 0.2 m/s²
-  # Predicted answer: B
-  # **Confidence**: High
-  # \\boxed{{B}}
-
-  # Example problem:
-  # What is the primary mechanism responsible for the generation of fast radio bursts (FRBs)?
-  #   A) Colliding neutron stars
-  #   B) Magnetar hyperflares
-  #   C) Extraterrestrial communication
-  #   D) Primordial black hole evaporation
-  # Predicted answer: B
-  # **Confidence**: Low
-  # \\boxed{{B}}
-
 system: ""
 
 user: |-
