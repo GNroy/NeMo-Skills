@@ -82,4 +82,6 @@ def eval_mcq_confidence(cfg):
                 analysis_match = re.search(r'<analysis>(.+)</analysis>', sample["generation"], re.DOTALL)
                 if analysis_match:
                     sample['confidence_analysis'] = analysis_match.group(1).strip()
+                else:
+                    sample['confidence_analysis'] = None
                 fout.write(json.dumps(sample) + "\n")
