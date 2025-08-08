@@ -70,6 +70,9 @@ def set_python_path_and_wait_for_server(server_address, generation_commands):
         cmd = get_server_wait_cmd(server_address) + " && "
     else:
         cmd = ""
+    # Allow overriding model max context for vLLM when requested via --max-model-len
+    env_exports = "export VLLM_ALLOW_LONG_MAX_MODEL_LEN=1 && " if server_type == 'vllm' else ""
+    cmd = f"{env_exports}{cmd}"
     # will run in a single task always (no need to check mpi env vars)
     cmd += f"{generation_commands}"
     return wrap_python_path(cmd)
