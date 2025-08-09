@@ -1,0 +1,20 @@
+system: ""
+
+user: |-
+  Solve the following problem. Think step by step before deciding the final answer.
+
+  Write your reasoning under "Explanation:".
+  Then write one line: Answer: \boxed{{...}}
+  Then write one line: Confidence: High  or  Confidence: Low
+  End the message after the confidence line.
+
+  Your response must follow exactly:
+  Explanation:
+  [your reasoning here; do not include the final answer]
+
+  Answer: \boxed{{...}}
+  Confidence: High|Low
+
+  {problem}
+
+  Let's think step-by-step.
