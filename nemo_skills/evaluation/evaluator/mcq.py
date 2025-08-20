@@ -57,9 +57,29 @@ def eval_mcq_confidence(cfg):
         # extract confidence from text
         match = re.findall(r"(?i)[\*\_]{0,2}Confidence[\*\_]{0,2}\s*:[\s\*\_]{0,2}\s*(\w+)", text)
         if match:
-            return match[-1].strip()
-        return None
-    confidence_adequate = lambda x, y: (x == "high") and y['symbolic_correct'] or (x == "low") and not y['symbolic_correct']
+            confidence = match[-1].strip().lower()
+            confidence_type = "symbolic"
+            try:
+                confidence = int(confidence)
+                confidence_type = "numerical"
+            except ValueError:
+                pass
+            return confidence, confidence_type
+        return None, None
+    def confidence_adequate(confidence, confidence_type, sample):
+        # numerical
+        if confidence_type == "numerical":
+            return confidence >= 5 and sample['symbolic_correct'] or confidence < 5 and not sample['symbolic_correct']
+        # binary
+        if confidence_type == "symbolic":
+            return (confidence == "high") and sample['symbolic_correct'] or (confidence == "low") and not sample['symbolic_correct']
+        return False
+    def confidence2reward(confidence, confidence_type):
+        if confidence_type == "numerical":
+            return confidence
+        if confidence_type == "symbolic":
+            return int(confidence == "high")
+        return 0
 
     for file in unroll_files(cfg.input_files):
         with open(file, "rt", encoding="utf-8") as fin:
@@ -69,15 +89,14 @@ def eval_mcq_confidence(cfg):
                 sample['predicted_answer'] = extract_letter(sample["generation"])
                 sample['symbolic_correct'] = sample['predicted_answer'] == sample['expected_answer']
                 # confidence extraction
-                confidence = extract_confidence(sample["generation"])
+                confidence, confidence_type = extract_confidence(sample["generation"])
                 if confidence:
-                    confidence = confidence.lower()
                     sample['confidence'] = confidence
-                    sample['confidence_adequate'] = confidence_adequate(confidence, sample)
+                    sample['confidence_adequate'] = confidence_adequate(confidence, confidence_type, sample)
                 else:
                     sample['confidence'] = None
                     sample['confidence_adequate'] = False
-                sample['reward_model_score'] = int(sample['confidence'] == "high")
+                sample['reward_model_score'] = confidence2reward(sample['confidence'], confidence_type)
                 # attempt to extract confidence analysis
                 analysis_match = re.search(r'<analysis>(.+)</analysis>', sample["generation"], re.DOTALL)
                 if analysis_match:
