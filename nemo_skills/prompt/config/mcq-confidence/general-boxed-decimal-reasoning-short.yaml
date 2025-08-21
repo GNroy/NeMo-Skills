@@ -1,0 +1,15 @@
+# prompt for any benchmarks evaluated with boxed (e.g. math, mmlu-pro, gpqa)
+
+system: ""
+
+user: |-
+  Solve the following problem. Make sure to put the answer letter (and only the answer letter) inside \boxed{{}}.
+  Provide a confidence for the answer in the format "Confidence: {{number from 0 to 9}}". The higher the number, the more confident you are in the answer.
+  Analyze your confidence and put your confidence reasoning inside <analysis> </analysis> tags.
+
+  Your response should be in the following format:
+  Explanation: {{your explanation for your final answer and your confidence analysis within <analysis> </analysis> tags}}
+  Answer: {{your succinct, final answer in \boxed{{}} format}}
+  Confidence: {{your confidence in your answer, a number from 0 to 9}}
+
+  {problem}
