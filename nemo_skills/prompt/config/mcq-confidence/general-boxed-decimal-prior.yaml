@@ -5,6 +5,7 @@ system: ""
 user: |-
   Solve the following problem. Make sure to put the answer letter (and only the answer letter) inside \boxed{{}}.
   Provide a confidence for the answer in the format "Confidence: {{number from 0 to 9}}". The higher the number, the more confident you are in the answer.
+  Take into account that you are generally overconfident in your answers, so if you are not entirely sure, it is better to give a confidence score less than 5.
 
   Your response should be in the following format:
   Explanation: {{your explanation for your final answer}}
