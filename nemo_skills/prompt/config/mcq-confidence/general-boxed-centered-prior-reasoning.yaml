@@ -1,0 +1,17 @@
+# prompt for any benchmarks evaluated with boxed (e.g. math, mmlu-pro, gpqa)
+
+system: ""
+
+user: |-
+  Solve the following problem. Make sure to put the answer letter (and only the answer letter) inside \boxed{{}}.
+  Analyze your confidence for the answer and put your confidence reasoning inside <analysis> </analysis> tags.
+  For every point of your confidence analysis that supports your answer, add a "+" sign before it. For every point that contradicts your answer, add a "-" sign before it.
+  Take into account that you are generally overconfident in your answers, so it is best to focus more on identifying negative ("-") points.
+  Provide a confidence for the answer according to the analysis by putting all + and - signs together. E.g. +--+++
+
+  Your response should be in the following format:
+  Explanation: {{your explanation for your final answer and your confidence analysis within <analysis> </analysis> tags}}
+  Answer: {{your succinct, final answer in \boxed{{}} format}}
+  Confidence: {{your confidence in your answer, all + and - signs from the analysis, put together}}
+
+  {problem}

@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import json
+import math
 import logging
 import re
 
@@ -55,10 +56,12 @@ def eval_mcq_confidence(cfg):
     # confidence helper functions
     def extract_confidence(text):
         # extract confidence from text
-        match = re.findall(r"(?i)[\*\_]{0,2}Confidence[\*\_]{0,2}\s*:[\s\*\_]{0,2}\s*(\w+)", text)
+        match = re.findall(r"(?i)[\*\_]{0,2}Confidence[\*\_]{0,2}\s*:[\s\*\_]{0,2}\s*([\+\-]+[^\w-]|\w+)", text)
         if match:
             confidence = match[-1].strip().lower()
-            confidence_type = "symbolic"
+            confidence_type = "binary"
+            if confidence.startswith("+") or confidence.startswith("-"):
+                confidence_type = "pros&cons"
             try:
                 confidence = int(confidence)
                 confidence_type = "numerical"
@@ -71,14 +74,19 @@ def eval_mcq_confidence(cfg):
         if confidence_type == "numerical":
             return confidence >= 5 and sample['symbolic_correct'] or confidence < 5 and not sample['symbolic_correct']
         # binary
-        if confidence_type == "symbolic":
+        if confidence_type == "binary":
             return (confidence == "high") and sample['symbolic_correct'] or (confidence == "low") and not sample['symbolic_correct']
+        if confidence_type == "pros&cons":
+            return confidence.count("+") > confidence.count("-") and sample['symbolic_correct'] or confidence.count("-") >= confidence.count("+") and not sample['symbolic_correct']
         return False
     def confidence2reward(confidence, confidence_type):
         if confidence_type == "numerical":
-            return confidence
-        if confidence_type == "symbolic":
+            return confidence if confidence is not None else 0
+        if confidence_type == "binary":
             return int(confidence == "high")
+        if confidence_type == "pros&cons":
+            scaled_shifted_arctangent = lambda x: 2 / math.pi * math.atan(x) + 1
+            return scaled_shifted_arctangent(confidence.count("+") - confidence.count("-"))
         return 0
 
     for file in unroll_files(cfg.input_files):
