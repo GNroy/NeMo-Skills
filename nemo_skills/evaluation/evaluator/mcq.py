@@ -56,7 +56,7 @@ def eval_mcq_confidence(cfg):
     # confidence helper functions
     def extract_confidence(text):
         # extract confidence from text
-        match = re.findall(r"(?i)[\*\_]{0,2}Confidence[\*\_]{0,2}\s*:[\s\*\_]{0,2}\s*([\+\-]+[^\w-]|\w+)", text)
+        match = re.findall(r"(?i)[\*\_]{0,2}Confidence[\*\_]{0,2}\s*:[\s\*\_]{0,2}\s*([\+\-]+|\w+)", text)
         if match:
             confidence = match[-1].strip().lower()
             confidence_type = "binary"
