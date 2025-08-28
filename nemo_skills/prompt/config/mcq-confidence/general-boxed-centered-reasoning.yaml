@@ -6,6 +6,7 @@ user: |-
   Solve the following problem. Make sure to put the answer letter (and only the answer letter) inside \boxed{{}}.
   Analyze your confidence for the answer and put your confidence reasoning inside <analysis> </analysis> tags.
   For every point of your confidence analysis that supports your answer, add a "+" sign before it. For every point that contradicts your answer, add a "-" sign before it.
+  If you think that some point of the analysis is strongly supporting or contradicting your answer, you can add double plus ("++") or double minus ("--") signs before it, respectfully.
   Provide a confidence for the answer according to the analysis by putting all + and - signs together. E.g. +--+++
 
   Your response should be in the following format:
