@@ -148,7 +148,7 @@ class NSTaskDataSpec(TaskDataSpec):
 
 
 def apply_ns_chat_template(prompt, datum_dict) -> str:
-    return prompt.fill(datum_dict, return_templated_dict=True)
+    return prompt.fill(datum_dict)
 
 
 def remove_duplicate_bos_tokens(token_ids: torch.Tensor, tokenizer: TokenizerType) -> tuple[torch.Tensor, bool]:
