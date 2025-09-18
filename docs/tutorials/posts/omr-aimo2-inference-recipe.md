@@ -3,7 +3,7 @@ date: 2025-08-28
 readtime: 20
 ---
 
-# Building an Efficient Inference Engine for Math Problems
+# Building an Efficient Inference Engine for Solving Math Problems
 
 This tutorial guides you through creating a high-performance inference engine using [NeMo-Skills](https://nvidia.github.io/NeMo-Skills/) to tackle complex math problems. It demonstrates the inference pipeline used to win the [AIMO-2 competition](https://www.kaggle.com/competitions/ai-mathematical-olympiad-progress-prize-2/writeups/nemoskills-1st-place-solution-nemoskills). With FP8 quantization and ReDrafter speculative decoding, we demonstrate up to 4× faster batched inference compared to BF16 on two H100 GPUs.
 
@@ -64,10 +64,10 @@ export HF_TOKEN=hf_YOUR_HUGGING_FACE_TOKEN # Replace with your actual token
 pip install -U "huggingface_hub[cli]"
 
 # Download the 14B parameter main model
-huggingface-cli download nvidia/OpenMath-Nemotron-14B-kaggle --local-dir OpenMath-Nemotron-14B-kaggle
+hf download nvidia/OpenMath-Nemotron-14B-kaggle --local-dir OpenMath-Nemotron-14B-kaggle
 
 # Download the OpenMathReasoning dataset for calibration
-huggingface-cli download nvidia/OpenMathReasoning --repo-type dataset --local-dir OpenMathReasoning
+hf download nvidia/OpenMathReasoning --repo-type dataset --local-dir OpenMathReasoning
 ```
 
 ### Preparing the Calibration Dataset for FP8 Quantization

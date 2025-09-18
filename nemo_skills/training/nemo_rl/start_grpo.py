@@ -26,6 +26,7 @@ from typing import Any, Optional
 
 import torch
 
+from datasets import Dataset, load_dataset
 from nemo_rl.algorithms.grpo import MasterConfig, grpo_train, setup
 from nemo_rl.algorithms.utils import get_tokenizer
 from nemo_rl.data import DataConfig
@@ -60,8 +61,6 @@ def parse_args() -> tuple[argparse.Namespace, list[str]]:
 #                             Custom Math Dataset (@nemo-skills)
 # ===============================================================================
 
-from datasets import Dataset, load_dataset
-
 
 def load_jsonl_as_dataset(
     filepath: str,
@@ -91,6 +90,8 @@ def load_jsonl_as_dataset(
 
 
 def extract_dataset(split, dataset_path):
+    if dataset_path is None:
+        return None
     if not dataset_path.startswith("/"):
         original_ds = load_dataset(dataset_path, split=split)
     else:
@@ -109,7 +110,8 @@ def format_passthrough(data):
 def prepare_math_dataset(split_ds):
     # Format the examples, removing original columns
     train_formatted = split_ds["train"].map(format_passthrough)
-    val_formatted = split_ds["validation"].map(format_passthrough)
+    val_raw = split_ds.get("validation", None)
+    val_formatted = None if val_raw is None else val_raw.map(format_passthrough)
 
     return {
         "train": train_formatted,
