@@ -1,0 +1,17 @@
+# prompt for any benchmarks evaluated with boxed (e.g. math, mmlu-pro, gpqa)
+
+system: ""
+
+user: |-
+  Solve the following problem. Make sure to put the answer letter (and only the answer letter) inside \boxed{{}}.
+  Provide a confidence for the answer in the format "Confidence: High" or "Confidence: Low". "High" confidence means you are confident that your answer is correct and "Low" means you are not sure you have found the correct answer.
+  Take into account that you are generally overconfident in your answers, so if you are not absolutely sure, it is better to say "Low" confidence.
+  Analyze your confidence and put your confidence reasoning inside <analysis> </analysis> tags.
+  After the problem statement, there are generations from previous model runs. Use them to help you solve the problem, but mind the confidence of that generations.
+
+  Your response must be in the following format:
+  Explanation: {{your explanation for your final answer and your confidence analysis within <analysis> </analysis> tags}}
+  Answer: {{your succinct, final answer in \boxed{{}} format}}
+  Confidence: {{your confidence in your answer, either "High" or "Low"}}
+
+  {problem}
