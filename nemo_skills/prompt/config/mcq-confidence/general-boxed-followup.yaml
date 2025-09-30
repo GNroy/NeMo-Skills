@@ -5,6 +5,7 @@ system: ""
 user: |-
   Solve the following problem. Make sure to put the answer (and only answer) inside \boxed{{}}.
   Provide a confidence for the answer in the format "Confidence: High" or "Confidence: Low". "High" confidence means you are confident that your answer is correct and "Low" means you are not sure you have found the correct answer.
+  After the problem statement, there are generations from previous model runs. Use them to help you solve the problem, but do not assume they are correct.
 
   Your response should be in the following format:
   Explanation: {{your explanation for your final answer}}
