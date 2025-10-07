@@ -29,6 +29,7 @@ from torchx.specs.api import AppState
 
 from nemo_skills.pipeline.utils.cluster import (
     get_env_variables,
+    get_slurm_timeout_str,
     get_tunnel,
     temporary_env_update,
     tunnel_hash,
@@ -227,10 +228,7 @@ def get_executor(
                 slurm_kwargs = {}
             slurm_kwargs["exclusive"] = True
 
-    if "timeouts" not in cluster_config:
-        timeout = "10000:00:00:00"
-    else:
-        timeout = cluster_config["timeouts"][partition]
+    timeout = get_slurm_timeout_str(cluster_config, partition, with_save_delay=False)
 
     additional_parameters = {"time_min": time_min} if time_min is not None else {}
     if cluster_config.get("mail_type") is not None:
@@ -345,6 +343,7 @@ def add_task(
     partition=None,
     time_min=None,
     with_sandbox=False,
+    keep_mounts_for_sandbox=False,
     sandbox_port: int | None = None,
     server_config=None,
     reuse_code_exp: str | run.Experiment | None = None,
@@ -529,7 +528,7 @@ def add_task(
                 gpus_per_node=0,
                 partition=partition,
                 time_min=time_min,
-                mounts=[],  # we don't want to mount anything
+                mounts=None if keep_mounts_for_sandbox else [],
                 dependencies=dependencies,
                 job_name=task_name,
                 log_dir=log_dir,

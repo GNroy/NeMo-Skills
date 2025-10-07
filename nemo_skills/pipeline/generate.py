@@ -27,6 +27,7 @@ from nemo_skills.utils import (
     get_logger_name,
     setup_logging,
     str_ids_to_list,
+    validate_wandb_project_name,
 )
 
 LOG = logging.getLogger(get_logger_name(__file__))
@@ -129,6 +130,10 @@ def generate(
         False, help="If True, will re-run jobs even if a corresponding '.done' file already exists"
     ),
     with_sandbox: bool = typer.Option(False, help="If True, will start a sandbox container alongside this job"),
+    keep_mounts_for_sandbox: bool = typer.Option(
+        False,
+        help="If True, will keep the mounts for the sandbox container. Note that, it is risky given that sandbox executes LLM commands and could potentially lead to data loss. So, we advise not to use this unless absolutely necessary.",
+    ),
     check_mounted_paths: bool = typer.Option(False, help="Check if mounted paths are available on the remote machine"),
     log_samples: bool = typer.Option(
         False,
@@ -182,10 +187,15 @@ def generate(
             "project": wandb_project,
             "group": wandb_group,
         }
+        validate_wandb_project_name(
+            wandb_project=wandb_project,
+            wandb_name=wandb_name or expname,
+            wandb_group=wandb_group,
+        )
     else:
         wandb_parameters = None
 
-    get_random_port = pipeline_utils.should_get_random_port(server_gpus, exclusive, server_type)
+    get_random_port = pipeline_utils.should_get_random_port(server_gpus, exclusive)
 
     if random_seeds and num_random_seeds:
         raise ValueError("Cannot specify both random_seeds and num_random_seeds")
@@ -303,6 +313,7 @@ def generate(
                         time_min=time_min,
                         server_config=server_config,
                         with_sandbox=with_sandbox,
+                        keep_mounts_for_sandbox=keep_mounts_for_sandbox,
                         sandbox_port=None if get_random_port else 6000,
                         run_after=run_after,
                         reuse_code=reuse_code,
