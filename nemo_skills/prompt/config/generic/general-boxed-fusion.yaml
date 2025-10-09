@@ -1,0 +1,10 @@
+# prompt for any benchmarks evaluated with boxed (e.g. math, mmlu-pro, gpqa)
+
+user: |-
+  Solve the following problem by fusing the solutions from previous model runs.
+  Fuse the solutions from previous model runs into a new final solution that combines the strength of each.
+  Make sure to put the answer (and only answer) inside \boxed{{}}.
+
+  {problem}
+
+  {generated_solutions}
