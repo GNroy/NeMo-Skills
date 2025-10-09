@@ -7,4 +7,4 @@ user: |-
 
   {problem}
 
-  {generated_solutions}
+  {previous_generations}

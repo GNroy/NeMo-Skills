@@ -1,0 +1,9 @@
+# prompt for any benchmarks evaluated with boxed (e.g. math, mmlu-pro, gpqa)
+
+user: |-
+  Solve the following problem. Make sure to put the answer (and only answer) inside \boxed{{}}.
+  After the problem statement, there is a generation from a previous model run. Use it to solve the problem, but do not assume it is correct and look for alternative solutions.
+
+  {problem}
+
+  Previous generation: {previous_generation}
