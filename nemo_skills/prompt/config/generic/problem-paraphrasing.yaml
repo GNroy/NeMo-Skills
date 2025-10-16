@@ -1,9 +1,9 @@
 user: |-
-  Given the problem below, rephrase and expand it to help you do better answering. Maintain all information in the original question.
+  Given the problem below, rephrase it. Keep the information that is crucial to solving the original question, rephrase the rest.
   Start directly with the problem statement and DO NOT include any phrases such as "Here is a rephrased problem similar to a given one".
-  DO NOT solve the problem. After the problem is completed finish your response right away.
+  DO NOT solve the problem. DO NOT write \boxed{{}} anywhere. After the problem is completed finish your response right away.
 
   Original problem:
   {problem}
 
-  Reminder: DO NOT solve the problem, just rephrase it.
+  Reminder: DO NOT solve the problem, just rephrase it. DO NOT write \boxed{{}} anywhere.
