@@ -73,6 +73,7 @@ class ParallelThinkingConfig:
     window_size: int = 8  # Number of solutions compared in a single request
     solution_key: str = "generation"  # Key used for identifying the solution content
     filter_incomplete_solutions: bool = True  # Filter out incomplete solutions
+    shuffle_solutions: bool = True  # Whether to shuffle the solutions before selecting
 
     # Parameters specifically for Offline GenSelect/GenSynthesis
     generation_dir: str | None = None  # Assumes output-rs[random_seed].jsonl files in this directory
@@ -176,7 +177,8 @@ class ParallelThinkingTask:
                 }
             )
 
-        local_random.shuffle(solutions)
+        if self.cfg.shuffle_solutions:
+            local_random.shuffle(solutions)
         return solutions
 
     def _load_solutions(self, input_dir: str) -> Dict[str, List[Dict]]:
@@ -235,7 +237,8 @@ class ParallelThinkingTask:
             # Already have the solutions in the input directory
             # Hashing the prompt to get the key for the solutions
             solutions = self.prompt_to_solutions_dict[self.hash_prompt(prompt)]
-            local_random.shuffle(solutions)
+            if self.cfg.shuffle_solutions:
+                local_random.shuffle(solutions)
             # After shuffling, only take the first window_size solutions
             solutions = solutions[: self.cfg.window_size]
         else:
