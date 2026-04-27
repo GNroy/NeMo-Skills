@@ -21,6 +21,7 @@ from nemo_skills.pipeline.app import app
 # isort: on
 
 # need the imports to make sure the commands are registered
+from nemo_skills.pipeline.agent import agent
 from nemo_skills.pipeline.convert import convert
 from nemo_skills.pipeline.eval import eval
 from nemo_skills.pipeline.generate import generate
