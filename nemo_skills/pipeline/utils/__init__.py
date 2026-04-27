@@ -73,6 +73,7 @@ from nemo_skills.pipeline.utils.packager import (
     resolve_external_data_path,
 )
 from nemo_skills.pipeline.utils.scripts import (
+    AgentWorkerScript,
     BaseJobScript,
     GenerationClientScript,
     NemoGymRolloutsScript,
