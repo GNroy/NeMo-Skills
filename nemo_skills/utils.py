@@ -82,11 +82,19 @@ def nested_dataclass(*args, **kwargs):
         check_class = dataclass(check_class, **kwargs)
         orig_init = check_class.__init__
 
+        # Build a combined annotation map from the full MRO so that fields
+        # defined in parent classes are also recursively instantiated.
+        import inspect as _inspect
+        all_annotations = {}
+        for cls in reversed(_inspect.getmro(check_class)):
+            if hasattr(cls, '__annotations__'):
+                all_annotations.update(cls.__annotations__)
+
         def __init__(self, *, _init_nested=False, **kwargs):
             if _init_nested:
                 for name, value in kwargs.items():
-                    # getting field type
-                    ft = check_class.__annotations__.get(name, None)
+                    # getting field type (including inherited fields)
+                    ft = all_annotations.get(name, None)
 
                     if is_dataclass(ft) and isinstance(value, dict_types):
                         obj = ft(**value, _init_nested=_init_nested)
