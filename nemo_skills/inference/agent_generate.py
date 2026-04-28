@@ -60,8 +60,8 @@ class AgentTaskConfig(GenerationTaskConfig):
 
     # Override parent defaults: agents use chat messages format with a default template.
     # prompt_config must be set so fill_prompt can build messages from data fields
-    # like {problem}. Without it, the "pure openai path" requires data_point["messages"]
-    # to already exist, which standard benchmarks do not provide.
+    # like the 'problem' key. Without it, the "pure openai path" requires
+    # data_point["messages"] to already exist, which standard benchmarks do not provide.
     prompt_format: str = "openai"
     prompt_config: str = "agents/default_agent"
 
