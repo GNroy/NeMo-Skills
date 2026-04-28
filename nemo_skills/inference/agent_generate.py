@@ -34,8 +34,10 @@ Usage (direct Hydra):
 
 import logging
 import sys
+from pathlib import Path
 
 import hydra
+import yaml
 
 from nemo_skills.inference.generate import GenerationTask, GenerationTaskConfig
 from nemo_skills.utils import (
@@ -47,6 +49,14 @@ from nemo_skills.utils import (
 
 LOG = logging.getLogger(get_logger_name(__file__))
 
+# Load the agent system message from the canonical YAML once at import time.
+# This is injected via system_message so that benchmark-specific prompt_configs
+# (e.g. generic/physics with its LaTeX/boxed instructions) are used as-is for
+# the user turn while the agent tool-use instructions still appear in the system
+# turn.  Avoids duplicating the system prompt text in Python source.
+_AGENT_SYSTEM_YAML = Path(__file__).parents[1] / "prompt" / "config" / "agents" / "default_agent.yaml"
+_AGENT_SYSTEM_MSG: str = yaml.safe_load(_AGENT_SYSTEM_YAML.read_text())["system"]
+
 
 @nested_dataclass(kw_only=True)
 class AgentTaskConfig(GenerationTaskConfig):
@@ -54,16 +64,25 @@ class AgentTaskConfig(GenerationTaskConfig):
 
     Inherits all fields from GenerationTaskConfig and adds agent-specific options.
     Key differences from vanilla generation:
-    - prompt_format defaults to "openai"   (agents use chat messages)
-    - save_trajectory defaults to True     (full conversation saved in JSONL)
+    - prompt_format defaults to "openai"         (agents use chat messages)
+    - prompt_config falls back to agents/default_agent when no benchmark sets one
+    - system_message always carries the agent tool-use instructions so that
+      benchmark-specific prompt_configs keep their user-turn format
+    - save_trajectory defaults to True           (full conversation saved in JSONL)
     """
 
-    # Override parent defaults: agents use chat messages format with a default template.
-    # prompt_config must be set so fill_prompt can build messages from data fields
-    # like the 'problem' key. Without it, the "pure openai path" requires
-    # data_point["messages"] to already exist, which standard benchmarks do not provide.
+    # Agents use the chat-completion (OpenAI) format.  prompt_config is the
+    # fallback for benchmarks that do not set their own via GENERATION_ARGS.
+    # When a benchmark does set ++prompt_config (e.g. generic/physics), that
+    # override takes effect and the benchmark user template is used as-is.
     prompt_format: str = "openai"
     prompt_config: str = "agents/default_agent"
+
+    # The agent system message is always injected on top of whatever prompt_config
+    # is active (get_prompt merges system_message into the loaded config dict).
+    # This ensures the model receives tool-use instructions even when the
+    # benchmark prompt_config only defines a user template.
+    system_message: str = _AGENT_SYSTEM_MSG
 
     # Save full agent trajectory (conversation turns) in output JSONL.
     # Set to False to keep output files smaller when only the final answer matters.
