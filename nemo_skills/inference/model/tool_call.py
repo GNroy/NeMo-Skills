@@ -237,6 +237,13 @@ class ToolCallingWrapper:
             while True:
                 if isinstance(tokens_to_generate, int) and tokens_to_generate <= 0:
                     break
+
+                # Inject any async agent results that completed since last turn
+                for _tool in self.tool_manager.iter_tools():
+                    _injections = await _tool.get_pending_injections(request_id)
+                    if _injections:
+                        conversation.extend(_injections)
+
                 generation = await self.model.generate_async(
                     prompt=conversation,
                     tools=tools,
@@ -338,6 +345,12 @@ class ToolCallingWrapper:
             while True:
                 if isinstance(tokens_to_generate, int) and tokens_to_generate <= 0:
                     break
+
+                # Inject any async agent results that completed since last turn
+                for _tool in self.tool_manager.iter_tools():
+                    _injections = await _tool.get_pending_injections(request_id)
+                    if _injections:
+                        conversation.extend(_injections)
 
                 model_token_iterator = await self.model.generate_async(
                     prompt=conversation,

@@ -15,8 +15,21 @@
 """MCP tool for delegating tasks to worker agents in a multi-agent SLURM job.
 
 CallAgentTool wraps one or more agent workers behind a single MCP tool class.
-For each configured worker it exposes a separate tool named `call_{agent_name}`
-that the orchestrator (or any peer) can invoke.
+For each configured worker it exposes three tools:
+
+    call_{name}(task)
+        Blocking call — awaits the full agent response before returning.
+
+    call_{name}_async(task) → {"ticket_id": "...", "status": "pending"}
+        Non-blocking call — fires the HTTP request as a background asyncio
+        Task and returns immediately.  Results are injected into the
+        conversation automatically (via get_pending_injections) before
+        the next LLM turn.  collect_results() can be used for an explicit
+        blocking wait.
+
+    collect_results(ticket_ids)
+        Block until all specified ticket_ids are complete; return their
+        results.  Tickets already auto-injected are returned from cache.
 
 Worker address resolution
 -------------------------
@@ -24,10 +37,9 @@ Each worker runs in a separate SLURM het-group alongside its own LLM server.
 NeMo-Run exports the master node hostname for each het-group as an environment
 variable before starting Python:
 
-    SLURM_MASTER_NODE_HET_GROUP_0   ← orchestrator's group
-    SLURM_MASTER_NODE_HET_GROUP_1   ← first worker's group
-    SLURM_MASTER_NODE_HET_GROUP_2   ← second worker's group
-    …
+    SLURM_MASTER_NODE_HET_GROUP_0   <- orchestrator's group
+    SLURM_MASTER_NODE_HET_GROUP_1   <- first worker's group
+    ...
 
 CallAgentTool reads these at configure() time.  The `ns agent` pipeline
 command automatically injects the correct het_group index for each worker via
@@ -39,32 +51,22 @@ Configuration example (via tool_overrides from ns agent):
             "agents": {
                 "analyst": {"het_group": 1, "port": 7777},
                 "coder":   {"het_group": 2, "port": 7777},
-            }
+            },
+            "injection_role": "user",   # role for auto-injected async results
         }
     }
 
-For local testing (no SLURM), you can specify explicit addresses:
-    tool_overrides = {
-        "CallAgentTool": {
-            "agents": {
-                "analyst": {"host": "localhost", "port": 7778},
-            }
-        }
-    }
-
-The tool exposes:
-    call_analyst(task: str) → str   (final generation from the analyst worker)
-    call_coder(task: str)   → str
-
-Peer-to-peer hierarchy
------------------------
-Hierarchy is enforced by configuring agents with different tool sets:
-- Top-level orchestrator has CallAgentTool with all worker agents listed.
-- Each worker agent has CallAgentTool with only the agents it is allowed to
-  call (e.g., no agents at all → leaf node, or just a subset of peers).
-This is configured purely through tool_overrides at job submission time.
+injection_role
+--------------
+Controls the message role used when a completed async result is injected into
+the conversation before the next LLM turn.  Accepted values:
+    "user"   (default) — safest for cross-model compatibility
+    "system" — semantically more accurate but not supported by all models
+Set via ++tool_overrides.CallAgentTool.injection_role=system.
 """
 
+import asyncio
+import json
 import logging
 import os
 import uuid
@@ -85,7 +87,8 @@ class CallAgentTool(Tool):
     """Delegate tasks to worker agents via HTTP.
 
     One instance of this class handles all configured workers.
-    It exposes one tool per worker: call_{agent_name}.
+    It exposes one blocking tool, one async tool, and a shared
+    collect_results tool per worker set.
     """
 
     def __init__(self) -> None:
@@ -94,9 +97,23 @@ class CallAgentTool(Tool):
             "agents": {},
             # Per-call timeout in seconds
             "timeout_s": _DEFAULT_TIMEOUT_S,
+            # Role used when auto-injecting completed async results
+            "injection_role": "user",
         }
         # Resolved at configure() time: {name: url}
         self._agent_urls: Dict[str, str] = {}
+
+        # Async delegation state — all keyed by request_id to scope to one
+        # orchestrator loop invocation (one problem being solved).
+        #
+        # _pending_tasks:   request_id → {ticket_id → asyncio.Task[str]}
+        # _request_tickets: request_id → [ticket_id, ...]  (for cleanup)
+        # _ticket_meta:     ticket_id  → {agent_name, task_snippet}
+        # _ticket_results:  ticket_id  → str result  (after task completes)
+        self._pending_tasks: Dict[str, Dict[str, asyncio.Task]] = {}
+        self._request_tickets: Dict[str, List[str]] = {}
+        self._ticket_meta: Dict[str, Dict[str, str]] = {}
+        self._ticket_results: Dict[str, str] = {}
 
     # ------------------------------------------------------------------
     # Tool interface
@@ -111,7 +128,6 @@ class CallAgentTool(Tool):
         context: Dict[str, Any] | None = None,
     ) -> None:
         if overrides:
-            # Merge overrides — replace top-level keys
             for k, v in overrides.items():
                 if k == "agents" and isinstance(v, dict) and isinstance(self._config.get("agents"), dict):
                     # Deep-merge agent entries so partial overrides work
@@ -147,13 +163,13 @@ class CallAgentTool(Tool):
     async def list_tools(self) -> List[Dict[str, Any]]:
         tools = []
         for agent_name in self._agent_urls:
+            # Blocking variant
             tools.append(
                 {
                     "name": f"call_{agent_name}",
                     "description": (
-                        f"Delegate a task to the '{agent_name}' specialist agent. "
-                        f"The agent will use its own tools and reasoning to complete "
-                        f"the task and return the result."
+                        f"Delegate a task to the '{agent_name}' specialist agent and wait for the result. "
+                        f"Use when you need the result before proceeding."
                     ),
                     "input_schema": {
                         "type": "object",
@@ -170,6 +186,56 @@ class CallAgentTool(Tool):
                     },
                 }
             )
+            # Non-blocking (async) variant
+            tools.append(
+                {
+                    "name": f"call_{agent_name}_async",
+                    "description": (
+                        f"Delegate a task to the '{agent_name}' specialist agent without blocking. "
+                        f"Returns a ticket_id immediately; the result will be automatically injected "
+                        f"into this conversation when the agent finishes. "
+                        f"Use for independent sub-tasks that can run while you continue reasoning."
+                    ),
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {
+                            "task": {
+                                "type": "string",
+                                "description": (
+                                    "The complete task description for the agent. "
+                                    "Be specific — include all context the agent needs."
+                                ),
+                            }
+                        },
+                        "required": ["task"],
+                    },
+                }
+            )
+
+        # collect_results is only meaningful if there are agents to call
+        if self._agent_urls:
+            tools.append(
+                {
+                    "name": "collect_results",
+                    "description": (
+                        "Block until all specified async tickets complete and return their results. "
+                        "Use when you need results from previously-fired async calls before proceeding. "
+                        "Tickets that have already been auto-injected are returned from cache."
+                    ),
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {
+                            "ticket_ids": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "description": "List of ticket_ids returned by call_{name}_async.",
+                            }
+                        },
+                        "required": ["ticket_ids"],
+                    },
+                }
+            )
+
         return tools
 
     async def execute(
@@ -178,11 +244,189 @@ class CallAgentTool(Tool):
         arguments: Dict[str, Any],
         extra_args: Dict[str, Any] | None = None,
     ) -> str:
-        # tool_name is like "call_analyst" → agent_name is "analyst"
-        if not tool_name.startswith("call_"):
-            raise ValueError(f"CallAgentTool: unexpected tool name '{tool_name}'")
-        agent_name = tool_name[len("call_"):]
+        request_id = (extra_args or {}).get("request_id", "")
 
+        if tool_name == "collect_results":
+            return await self._collect_results(arguments.get("ticket_ids", []), request_id)
+
+        if tool_name.endswith("_async") and tool_name.startswith("call_"):
+            agent_name = tool_name[len("call_"):-len("_async")]
+            return await self._fire_async(agent_name, arguments.get("task", ""), request_id)
+
+        if tool_name.startswith("call_"):
+            agent_name = tool_name[len("call_"):]
+            return await self._call_blocking(agent_name, arguments.get("task", ""), request_id)
+
+        raise ValueError(f"CallAgentTool: unexpected tool name '{tool_name}'")
+
+    # ------------------------------------------------------------------
+    # Blocking call
+    # ------------------------------------------------------------------
+
+    async def _call_blocking(self, agent_name: str, task: str, request_id: str) -> str:
+        url = self._get_url(agent_name)
+        if not task:
+            return "Error: no task provided."
+        return await self._http_call(agent_name, url, task)
+
+    # ------------------------------------------------------------------
+    # Non-blocking (async) call
+    # ------------------------------------------------------------------
+
+    async def _fire_async(self, agent_name: str, task: str, request_id: str) -> str:
+        """Fire the HTTP call as a background task; return ticket immediately."""
+        url = self._get_url(agent_name)
+        if not task:
+            return json.dumps({"error": "no task provided"})
+
+        ticket_id = str(uuid.uuid4())
+
+        # Store metadata for the injection label (truncate for readability)
+        snippet = task[:80].replace("\n", " ")
+        self._ticket_meta[ticket_id] = {"agent_name": agent_name, "task_snippet": snippet}
+
+        # Fire the HTTP call as a background asyncio Task
+        bg_task = asyncio.create_task(self._http_call(agent_name, url, task))
+
+        # Register under request_id for scoped lookup and cleanup
+        self._pending_tasks.setdefault(request_id, {})[ticket_id] = bg_task
+        self._request_tickets.setdefault(request_id, []).append(ticket_id)
+
+        LOG.info(
+            "CallAgentTool: dispatched async task ticket=%s agent=%s request_id=%s",
+            ticket_id,
+            agent_name,
+            request_id,
+        )
+        return json.dumps({"ticket_id": ticket_id, "status": "pending"})
+
+    async def _collect_results(self, ticket_ids: List[str], request_id: str) -> str:
+        """Block until all specified tickets complete; return structured results."""
+        if not ticket_ids:
+            return json.dumps([])
+
+        results = []
+        tasks_to_await: Dict[str, asyncio.Task] = {}
+
+        for tid in ticket_ids:
+            # Already drained by auto-injection — result is in cache
+            if tid in self._ticket_results:
+                results.append(
+                    {
+                        "ticket_id": tid,
+                        "status": "already_injected",
+                        "result": self._ticket_results[tid],
+                    }
+                )
+                continue
+
+            task = self._pending_tasks.get(request_id, {}).get(tid)
+            if task is None:
+                results.append({"ticket_id": tid, "status": "not_found"})
+                continue
+
+            tasks_to_await[tid] = task
+
+        if tasks_to_await:
+            outcomes = await asyncio.gather(*tasks_to_await.values(), return_exceptions=True)
+            for tid, outcome in zip(tasks_to_await.keys(), outcomes):
+                result_str = f"Error: {outcome}" if isinstance(outcome, Exception) else str(outcome)
+
+                # Drain from pending and cache
+                self._pending_tasks.get(request_id, {}).pop(tid, None)
+                self._ticket_results[tid] = result_str
+
+                meta = self._ticket_meta.get(tid, {})
+                results.append(
+                    {
+                        "ticket_id": tid,
+                        "status": "completed",
+                        "agent": meta.get("agent_name", ""),
+                        "result": result_str,
+                    }
+                )
+
+        return json.dumps(results)
+
+    # ------------------------------------------------------------------
+    # Async injection hook
+    # ------------------------------------------------------------------
+
+    async def get_pending_injections(self, request_id: str) -> List[Dict]:
+        """Drain any completed background tasks and return them as messages.
+
+        Called by ToolCallingWrapper before each LLM turn.  Completed tasks
+        are removed from _pending_tasks, their results cached in
+        _ticket_results, and formatted messages returned for injection into
+        the conversation.
+        """
+        pending = self._pending_tasks.get(request_id, {})
+        if not pending:
+            return []
+
+        completed_ids = [tid for tid, task in pending.items() if task.done()]
+        if not completed_ids:
+            return []
+
+        injection_role = self._config.get("injection_role", "user")
+        injections = []
+
+        for tid in completed_ids:
+            task = pending.pop(tid)
+            try:
+                result = task.result()
+            except Exception as exc:
+                result = f"Error: {exc}"
+
+            # Cache so collect_results can still serve it if called later
+            self._ticket_results[tid] = result
+
+            meta = self._ticket_meta.get(tid, {})
+            agent_name = meta.get("agent_name", "unknown")
+            snippet = meta.get("task_snippet", "")
+            label = f'[Async result for ticket {tid} — call_{agent_name}_async "{snippet}"]'
+            content = f"{label}:\n{result}"
+
+            injections.append({"role": injection_role, "content": content})
+            LOG.info(
+                "CallAgentTool: injecting completed ticket=%s agent=%s",
+                tid,
+                agent_name,
+            )
+
+        return injections
+
+    # ------------------------------------------------------------------
+    # Cleanup
+    # ------------------------------------------------------------------
+
+    async def cleanup_request(self, request_id: str) -> None:
+        """Cancel any still-running background tasks for this request."""
+        pending = self._pending_tasks.pop(request_id, {})
+        for tid, task in pending.items():
+            if not task.done():
+                LOG.warning(
+                    "CallAgentTool: cancelling pending async task ticket=%s at request end", tid
+                )
+                task.cancel()
+                try:
+                    await task
+                except (asyncio.CancelledError, Exception):
+                    pass
+
+        # Clean up metadata for all tickets belonging to this request
+        for tid in self._request_tickets.pop(request_id, []):
+            self._ticket_meta.pop(tid, None)
+            self._ticket_results.pop(tid, None)
+
+    async def shutdown(self) -> None:
+        pass  # httpx clients are created per-request; nothing to clean up
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    def _get_url(self, agent_name: str) -> str:
         url = self._agent_urls.get(agent_name)
         if url is None:
             available = list(self._agent_urls.keys())
@@ -190,19 +434,16 @@ class CallAgentTool(Tool):
                 f"CallAgentTool: unknown agent '{agent_name}'. "
                 f"Available agents: {available}"
             )
+        return url
 
-        task = arguments.get("task", "")
-        if not task:
-            return "Error: no task provided."
-
+    async def _http_call(self, agent_name: str, url: str, task: str) -> str:
+        """Perform the HTTP POST to the agent server and return its generation."""
         task_id = str(uuid.uuid4())
         timeout = self._config.get("timeout_s", _DEFAULT_TIMEOUT_S)
-
         payload = {
             "task_id": task_id,
             "messages": [{"role": "user", "content": task}],
         }
-
         try:
             async with httpx.AsyncClient(timeout=timeout) as client:
                 response = await client.post(f"{url}/task", json=payload)
@@ -220,6 +461,3 @@ class CallAgentTool(Tool):
             return f"Error from agent '{agent_name}': {result['error']}"
 
         return result.get("generation", "")
-
-    async def shutdown(self) -> None:
-        pass  # Nothing to clean up — httpx clients are created per-request

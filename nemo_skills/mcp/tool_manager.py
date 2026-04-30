@@ -70,6 +70,18 @@ class Tool(ABC):
     async def cleanup_request(self, request_id: str) -> None:  # Optional hook
         return None
 
+    async def get_pending_injections(self, request_id: str) -> List[Dict]:  # Optional hook
+        """Return conversation messages to inject before the next LLM turn.
+
+        Tools that fire work in the background (e.g. CallAgentTool async
+        delegation) override this to push completed results into the
+        conversation before the orchestrator's next generation step.
+
+        Returns a list of message dicts, e.g.
+            [{"role": "user", "content": "[Async result ...]: ..."}]
+        """
+        return []
+
     async def shutdown(self) -> None:  # Optional hook
         return None
 
@@ -183,3 +195,7 @@ class ToolManager:
     async def execute_tool(self, raw_name: str, args: Dict[str, Any], extra_args: Dict[str, Any] | None = None):
         tool, bare = self._resolve(self._raw_to_qualified_map[raw_name])
         return await tool.execute(bare, args, extra_args=extra_args)
+
+    def iter_tools(self) -> Iterable[Tool]:
+        """Iterate over all live tool instances."""
+        return self._tools.values()
