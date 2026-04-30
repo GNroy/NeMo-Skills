@@ -244,7 +244,10 @@ def main():
             agent_odir = f"{odir}/{benchmark_args.eval_subfolder}"
 
             agent_kwargs = dict(
-                ctx=wrap_arguments(extra_args),
+                # benchmark_args.generation_args carries ++prompt_config and
+                # ++eval_type that the benchmark module defines; these must be
+                # forwarded so the agent uses the correct prompt template.
+                ctx=wrap_arguments(benchmark_args.generation_args + " " + extra_args),
                 cluster=args.cluster,
                 expname=name,
                 model=MODEL["path"],
@@ -254,6 +257,9 @@ def main():
                 server_args=server_args,
                 input_file=benchmark_args.input_file,
                 output_dir=agent_odir,
+                # Keep agent-logs at the top-level odir (same level as eval-logs),
+                # not nested inside the generation subdirectory.
+                log_dir=f"{odir}/agent-logs",
                 with_sandbox=True,
                 num_random_seeds=bcfg["num_random_seeds"],
                 num_chunks=bcfg["num_chunks"] if bcfg["num_chunks"] > 1 else None,
