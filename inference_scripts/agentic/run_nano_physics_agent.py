@@ -41,7 +41,7 @@ from nemo_skills.pipeline.cli import agent, eval, wrap_arguments
 from nemo_skills.pipeline.utils import get_cluster_config
 from nemo_skills.pipeline.utils.eval import add_default_args
 
-CLUSTER = "dfw"
+CLUSTER = "oci"
 
 OUTPUT_DIR_BASE = "/alaptev/exp/eval/nano_physics_agent"
 
