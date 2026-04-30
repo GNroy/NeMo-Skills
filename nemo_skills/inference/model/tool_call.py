@@ -318,6 +318,9 @@ class ToolCallingWrapper:
             result_steps["generation"] = "".join(result_steps["generation"])
             result_steps["num_generated_tokens"] = sum(result_steps["num_generated_tokens"])
             result_steps["num_tool_calls"] = sum(result_steps["num_tool_calls"])
+            # finish_reason is collected per-turn; keep only the final one.
+            fr = result_steps.get("finish_reason", [])
+            result_steps["finish_reason"] = fr[-1] if fr else None
             result_steps["conversation"] = conversation
             result_steps["tools"] = tools  # Schema sent to model (with overrides applied)
 

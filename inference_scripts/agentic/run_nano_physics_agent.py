@@ -121,9 +121,13 @@ ORCHESTRATOR_TOOL = '++tool_modules=["nemo_skills.mcp.servers.agent_tool::CallAg
 
 # Worker gets DirectPythonTool (runs code locally, no sandbox server needed)
 # + code-execution system prompt.
+# tokens_to_generate is capped to prevent per-call queue time from exceeding
+# the orchestrator's HTTP timeout when 100 concurrent problems all fire
+# call_solver_async simultaneously (worker semaphore=64, shared vLLM server).
 WORKER_EXTRA_ARGS = (
     '++tool_modules=["nemo_skills.mcp.servers.python_tool::DirectPythonTool"] '
     '++system_message_yaml=agents/code_agent '
+    '++inference.tokens_to_generate=32768 '
 )
 
 
@@ -192,6 +196,10 @@ def main():
                 + "++system_message_yaml=agents/orchestrator "
                 + "++inference.extra_body.tool_choice=required "
                 + "++chat_template_kwargs.enable_thinking=False "
+                # Allow up to 20 min per worker call: 100 concurrent problems all fire
+                # call_solver_async at once; worker semaphore=64 means up to 36 queue
+                # at any time, each waiting for a 32k-token worker call to free a slot.
+                + "++tool_overrides.CallAgentTool.timeout_s=1200 "
             )
         else:
             # Single-agent: one agent handles everything with PythonTool.
