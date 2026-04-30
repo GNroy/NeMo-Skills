@@ -113,7 +113,19 @@ Use prose like `the 'problem' key` instead.
 
 ---
 
-## 5. Pushing to `origin` (GNroy/NeMo-Skills)
+## 5. Activating the Python environment
+
+The pipeline scripts require the full `nemo-skills` install. Activate it with:
+
+```bash
+source ~/miniconda3/bin/activate
+```
+
+This must be run each session before calling any `inference_scripts/` or `ns` commands.
+
+---
+
+## 6. Pushing to `origin` (GNroy/NeMo-Skills)
 
 The `origin` remote uses SSH (`git@github.com:GNroy/NeMo-Skills.git`) with the
 key at `~/.ssh/gitlab` (mapped via `~/.ssh/config`).  There is no persistent
@@ -133,7 +145,7 @@ Notes:
 
 ---
 
-## 6. General: `rerun_done=False` means output files accumulate across resubmits
+## 7. General: `rerun_done=False` means output files accumulate across resubmits
 
 Each time the script is resubmitted without changing `--output-dir`, jobs whose
 chunk output files already exist are skipped (`skip_filled=True`). This is
