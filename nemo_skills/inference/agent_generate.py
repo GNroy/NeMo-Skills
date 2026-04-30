@@ -84,6 +84,11 @@ class AgentTaskConfig(GenerationTaskConfig):
     # benchmark prompt_config only defines a user template.
     system_message: str = _AGENT_SYSTEM_MSG
 
+    # If set (e.g. "agents/orchestrator"), loads the system message from that
+    # prompt config YAML at task init time, overriding the system_message default.
+    # Accepts the same config-name format as prompt_config.
+    system_message_yaml: str = ""
+
     # Save full agent trajectory (conversation turns) in output JSONL.
     # Set to False to keep output files smaller when only the final answer matters.
     save_trajectory: bool = True
@@ -108,6 +113,18 @@ class AgentTask(GenerationTask):
     """
 
     def __init__(self, cfg: AgentTaskConfig):
+        # Resolve system_message from YAML config if requested, overriding the default.
+        if cfg.system_message_yaml:
+            _yaml_path = (
+                Path(__file__).parents[1]
+                / "prompt"
+                / "config"
+                / f"{cfg.system_message_yaml}.yaml"
+            )
+            loaded = yaml.safe_load(_yaml_path.read_text())
+            cfg.system_message = loaded.get("system", "")
+            LOG.info("AgentTask: loaded system_message from %s", _yaml_path)
+
         if not cfg.tool_modules:
             LOG.warning(
                 "AgentTask initialized without tool_modules. "

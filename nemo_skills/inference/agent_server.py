@@ -36,9 +36,11 @@ import logging
 import sys
 import uuid
 from dataclasses import field
+from pathlib import Path
 
 import hydra
 import uvicorn
+import yaml
 from fastapi import FastAPI
 from pydantic import BaseModel
 
@@ -91,6 +93,13 @@ class AgentServerConfig:
     # Concurrency: max simultaneous in-flight task requests
     max_concurrent_tasks: int = 64
 
+    # System message prepended to every incoming task request.
+    # If system_message_yaml is set (e.g. "agents/code_agent"), the system
+    # message is loaded from that prompt config YAML at server startup,
+    # overriding any value set in system_message.
+    system_message: str = ""
+    system_message_yaml: str = ""
+
 
 cs = hydra.core.config_store.ConfigStore.instance()
 cs.store(name="base_agent_server_config", node=AgentServerConfig)
@@ -132,6 +141,23 @@ class AgentServer:
     def __init__(self, cfg: AgentServerConfig):
         self.cfg = cfg
         self.semaphore = asyncio.Semaphore(cfg.max_concurrent_tasks)
+
+        # Resolve system message from YAML config if requested.
+        if cfg.system_message_yaml:
+            _yaml_path = (
+                Path(__file__).parents[1]
+                / "prompt"
+                / "config"
+                / f"{cfg.system_message_yaml}.yaml"
+            )
+            loaded = yaml.safe_load(_yaml_path.read_text())
+            cfg.system_message = loaded.get("system", "")
+            LOG.info(
+                "AgentServer '%s': loaded system_message from %s",
+                cfg.agent_name,
+                _yaml_path,
+            )
+        self._system_message = cfg.system_message
 
         sandbox = get_sandbox(**cfg.sandbox) if cfg.sandbox else None
 
@@ -177,8 +203,13 @@ class AgentServer:
                 # Remove stream from params — server mode uses non-streaming for simplicity
                 inference_params.pop("stream", None)
 
+                # Prepend system message if configured (e.g. for a code-execution worker).
+                messages = request.messages
+                if self._system_message:
+                    messages = [{"role": "system", "content": self._system_message}] + messages
+
                 result = await self.llm.generate_async(
-                    prompt=request.messages,
+                    prompt=messages,
                     endpoint_type=EndpointType.chat,
                     **inference_params,
                 )

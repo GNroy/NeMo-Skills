@@ -107,7 +107,17 @@ BENCHMARKS = {
     },
 }
 
+# Single-agent: the one agent handles everything with PythonTool.
 PYTHON_TOOL = '++tool_modules=["nemo_skills.mcp.servers.python_tool::PythonTool"] '
+
+# Multi-agent: orchestrator delegates via CallAgentTool (no direct Python access).
+ORCHESTRATOR_TOOL = '++tool_modules=["nemo_skills.mcp.servers.agent_tool::CallAgentTool"] '
+
+# Worker gets PythonTool + code-execution system prompt.
+WORKER_EXTRA_ARGS = (
+    '++tool_modules=["nemo_skills.mcp.servers.python_tool::PythonTool"] '
+    '++system_message_yaml=agents/code_agent '
+)
 
 
 def main():
@@ -157,17 +167,24 @@ def main():
         print(f"  workers:    {args.worker_model or '(none — single agent)'}")
         print(f"{'=' * 60}")
 
-        extra_args = (
-            MODEL["sampling_args"]
-            + MODEL["inference_args"]
-            + PYTHON_TOOL
-            + f"++max_tool_calls={args.max_tool_calls} "
-        )
+        base_args = MODEL["sampling_args"] + MODEL["inference_args"] + f"++max_tool_calls={args.max_tool_calls} "
+
+        if args.worker_model:
+            # Multi-agent: orchestrator delegates via CallAgentTool with orchestrator
+            # system prompt; workers handle computation with PythonTool.
+            extra_args = base_args + ORCHESTRATOR_TOOL + "++system_message_yaml=agents/orchestrator "
+        else:
+            # Single-agent: one agent handles everything with PythonTool.
+            extra_args = base_args + PYTHON_TOOL
 
         if args.dry_run:
-            print("  [DRY] extra args:")
+            print("  [DRY] orchestrator args:")
             for token in extra_args.strip().split():
                 print(f"    {token}")
+            if args.worker_model:
+                print("  [DRY] worker args:")
+                for token in WORKER_EXTRA_ARGS.strip().split():
+                    print(f"    {token}")
             results.append((name, odir))
             continue
 
@@ -234,6 +251,7 @@ def main():
                 worker_server_type=args.worker_server_type,
                 worker_server_gpus=args.worker_gpus,
                 worker_names=args.worker_names,
+                worker_extra_args=[WORKER_EXTRA_ARGS],
             )
             agent(**agent_kwargs)
 
