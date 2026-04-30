@@ -364,3 +364,96 @@ python inference_scripts/agentic/run_nano_physics_agent.py \
 
 `--worker-names solver` gives the tool `call_solver` — matching the orchestrator
 system prompt's phrasing.  Omit for default `call_worker_0`.
+
+---
+
+## 7. Phase 1 Extension: Non-Blocking Async Agent Delegation
+
+### Motivation
+
+In the blocking `call_{name}` pattern the orchestrator's loop is idle for the
+entire duration of the worker's run.  This is wasteful when:
+- multiple independent sub-tasks can be delegated concurrently, or
+- the orchestrator can continue reasoning (e.g. verify constraints, formulate
+  follow-up tasks) while a slow solver is computing.
+
+### Design
+
+`CallAgentTool` now exposes **three tools per worker** instead of one:
+
+| Tool | Behaviour |
+|---|---|
+| `call_{name}(task)` | Existing blocking call — awaits the full response |
+| `call_{name}_async(task)` | Fires HTTP request as background `asyncio.Task`; returns `{"ticket_id":"...","status":"pending"}` immediately |
+| `collect_results(ticket_ids)` | Explicit blocking wait for specific tickets; already-injected tickets returned from cache |
+
+Completed background tasks are **automatically injected** into the conversation
+as new messages before each LLM turn, so the orchestrator sees results without
+having to call any polling tool.
+
+### Scheduling diagram
+
+```
+Orchestrator loop (single problem)
+
+Turn N:   <tool_call: call_solver_async("compute X")>   ← fires bg task T1
+          <tool_call: call_solver_async("compute Y")>   ← fires bg task T2
+          tool results: {"ticket_id":"t1","status":"pending"}
+                        {"ticket_id":"t2","status":"pending"}
+
+Turn N+1: [ToolCallingWrapper checks get_pending_injections — nothing done yet]
+          LLM continues reasoning, calls python_exec, etc.
+
+Turn N+2: [ToolCallingWrapper checks — T1 done]
+          → injects: [Async result for ticket t1 — call_solver_async "compute X"]: ...
+          LLM sees injected result; T2 still running
+
+Turn N+3: [ToolCallingWrapper checks — T2 done]
+          → injects: [Async result for ticket t2 — call_solver_async "compute Y"]: ...
+          LLM synthesises final answer
+```
+
+Multiple problems proceed concurrently at the `asyncio` level — each has its own
+`request_id` and independent `_pending_tasks` dict, so background tasks for
+different problems never interfere.
+
+### Implementation
+
+**`nemo_skills/mcp/tool_manager.py`**
+- `Tool` base: added `async get_pending_injections(request_id) → List[Dict]` no-op hook
+- `ToolManager`: added `iter_tools()` to expose live tool instances to callers
+
+**`nemo_skills/mcp/servers/agent_tool.py`** — extended `CallAgentTool`:
+- `_config["injection_role"]` (default `"user"`) — role of the injected message;
+  configurable via `++tool_overrides.CallAgentTool.injection_role=system`
+- New state dicts scoped by `request_id`:
+  - `_pending_tasks`: `{request_id → {ticket_id → asyncio.Task[str]}}`
+  - `_request_tickets`: `{request_id → [ticket_ids]}` for cleanup
+  - `_ticket_meta`: `{ticket_id → {agent_name, task_snippet}}`
+  - `_ticket_results`: `{ticket_id → str}` — cache after task drains
+- `_fire_async`: calls `asyncio.create_task(_http_call(...))`, returns ticket JSON
+- `_collect_results`: `asyncio.gather` on requested pending tasks
+- `get_pending_injections`: drains `.done()` tasks, formats injection messages,
+  caches results so `collect_results` can still serve already-injected tickets
+- `cleanup_request`: cancels and awaits any still-running tasks; clears all per-request state
+
+**`nemo_skills/inference/model/tool_call.py`** — `ToolCallingWrapper.generate_async`
+and `_stream_single`: before each `model.generate_async(...)` call, iterate
+`tool_manager.iter_tools()` and extend conversation with any pending injections.
+
+**`nemo_skills/prompt/config/agents/orchestrator.yaml`** — updated to document
+all three delegation tools, when to use each, and the auto-injection format.
+
+### Key properties
+
+- **Zero extra round-trips**: async results arrive as injected messages; the
+  orchestrator never needs to poll.
+- **Explicit fallback**: `collect_results` lets the orchestrator block on a
+  specific ticket if it cannot proceed without it.
+- **Per-request isolation**: all state is keyed by `request_id`; concurrent
+  problems running on the same orchestrator process are fully independent.
+- **Injection role is configurable**: use `"user"` (default, safe for all
+  models) or `"system"` (semantically accurate but model-dependent).
+- **Graceful cleanup**: `cleanup_request` (called in the `finally` block of
+  `ToolCallingWrapper.generate_async`) cancels any unfinished background tasks,
+  preventing resource leaks across problems.
