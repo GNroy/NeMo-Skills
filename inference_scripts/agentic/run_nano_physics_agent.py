@@ -199,15 +199,62 @@ def main():
             continue
 
         # ----------------------------------------------------------------
-        # Common eval() kwargs for judge + summarize.
-        # eval() also handles generation (agent_generate module) when no
-        # pre-existing outputs are found; otherwise skip_filled=True makes
-        # the generation step exit immediately.
+        # agent() runs generation for both single- and multi-agent modes.
+        # eval() chains judge + summarize afterwards (run_after=name).
         # ----------------------------------------------------------------
+        # Resolve benchmark → input_file and generation_args (e.g.
+        # ++prompt_config, ++eval_type) defined by the benchmark module.
+        benchmark_args_list = add_default_args(
+            cluster_config=cluster_config,
+            benchmark_or_group=bcfg["name"],
+            split=bcfg["split"],
+            data_dir=None,
+            eval_requires_judge=True,
+        )
+        benchmark_args = benchmark_args_list[0]
+        # agent() writes to the subdir that eval() expects, so eval's
+        # skip_filled logic finds the .done files after agent finishes.
+        agent_odir = f"{odir}/{benchmark_args.eval_subfolder}"
+
+        agent_kwargs = dict(
+            # benchmark_args.generation_args carries ++prompt_config and
+            # ++eval_type defined by the benchmark module.
+            ctx=wrap_arguments(benchmark_args.generation_args + " " + extra_args),
+            cluster=args.cluster,
+            expname=name,
+            model=MODEL["path"],
+            server_type=MODEL["server_type"],
+            server_gpus=MODEL["server_gpus"],
+            server_nodes=MODEL["server_nodes"],
+            server_args=server_args,
+            input_file=benchmark_args.input_file,
+            output_dir=agent_odir,
+            # Keep agent-logs at the top-level odir (same level as eval-logs).
+            log_dir=f"{odir}/agent-logs",
+            with_sandbox=True,
+            num_random_seeds=bcfg["num_random_seeds"],
+            num_chunks=bcfg["num_chunks"] if bcfg["num_chunks"] > 1 else None,
+        )
+
+        if args.worker_model:
+            agent_kwargs.update(
+                worker_model=args.worker_model,
+                worker_server_type=args.worker_server_type,
+                worker_server_gpus=args.worker_gpus,
+                worker_names=args.worker_names,
+                worker_extra_args=[WORKER_EXTRA_ARGS],
+                # Workers share the orchestrator's LLM server (same model → no
+                # redundant vLLM instance).
+                worker_reuse_orchestrator_server=True,
+            )
+
+        agent(**agent_kwargs)
+
+        # eval() for judge + summarize; waits for agent() to finish.
         eval_kwargs = dict(
             ctx=wrap_arguments(extra_args),
             cluster=args.cluster,
-            expname=name,
+            expname=f"{name}-eval",
             output_dir=odir,
             benchmarks=f"{bcfg['name']}:{bcfg['num_random_seeds']}",
             split=bcfg["split"],
@@ -223,64 +270,8 @@ def main():
             judge_server_type=JUDGE_SERVER_TYPE,
             judge_server_gpus=JUDGE_SERVER_GPUS,
             judge_server_args=JUDGE_SERVER_ARGS,
+            run_after=[name],
         )
-
-        if args.worker_model:
-            # ----------------------------------------------------------
-            # Multi-agent mode: agent() runs the het-job for generation,
-            # eval() chains judge + summarize afterwards.
-            # ----------------------------------------------------------
-            # Resolve benchmark → input_file for the agent() call.
-            benchmark_args_list = add_default_args(
-                cluster_config=cluster_config,
-                benchmark_or_group=bcfg["name"],
-                split=bcfg["split"],
-                data_dir=None,
-                eval_requires_judge=True,
-            )
-            benchmark_args = benchmark_args_list[0]
-            # Agent writes to the same subdir that eval() expects, so that
-            # eval's skip_filled logic finds the .done files after agent finishes.
-            agent_odir = f"{odir}/{benchmark_args.eval_subfolder}"
-
-            agent_kwargs = dict(
-                # benchmark_args.generation_args carries ++prompt_config and
-                # ++eval_type that the benchmark module defines; these must be
-                # forwarded so the agent uses the correct prompt template.
-                ctx=wrap_arguments(benchmark_args.generation_args + " " + extra_args),
-                cluster=args.cluster,
-                expname=name,
-                model=MODEL["path"],
-                server_type=MODEL["server_type"],
-                server_gpus=MODEL["server_gpus"],
-                server_nodes=MODEL["server_nodes"],
-                server_args=server_args,
-                input_file=benchmark_args.input_file,
-                output_dir=agent_odir,
-                # Keep agent-logs at the top-level odir (same level as eval-logs),
-                # not nested inside the generation subdirectory.
-                log_dir=f"{odir}/agent-logs",
-                with_sandbox=True,
-                num_random_seeds=bcfg["num_random_seeds"],
-                num_chunks=bcfg["num_chunks"] if bcfg["num_chunks"] > 1 else None,
-                worker_model=args.worker_model,
-                worker_server_type=args.worker_server_type,
-                worker_server_gpus=args.worker_gpus,
-                worker_names=args.worker_names,
-                worker_extra_args=[WORKER_EXTRA_ARGS],
-                # Workers share the orchestrator's LLM server (same model → no
-                # redundant vLLM instance).  Workers run as lightweight HTTP
-                # servers co-located in het-group 0.
-                worker_reuse_orchestrator_server=True,
-            )
-            agent(**agent_kwargs)
-
-            # eval() for judge + summarize waits for agent to finish.
-            # It will also submit (and immediately skip) generation jobs
-            # if .done files are not yet present at submission time.
-            eval_kwargs["run_after"] = [name]
-            eval_kwargs["expname"] = f"{name}-eval"
-
         eval(**eval_kwargs)
         results.append((name, odir))
 
