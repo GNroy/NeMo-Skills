@@ -51,6 +51,14 @@ JUDGE_SERVER_TYPE = "vllm"
 JUDGE_SERVER_GPUS = 8
 JUDGE_SERVER_ARGS = "--async-scheduling --max-model-len 131072"
 
+# vLLM flags that require NVIDIA compute capability ≥ 9.0 (H100/H200).
+# OCI uses A100 (cc 8.0) — these are appended only for clusters in _H100_CLUSTERS.
+_H100_SERVER_ARGS = (
+    "--kv-cache-dtype fp8 "
+    "--attention-backend FLASH_ATTN "
+)
+_H100_CLUSTERS = {"dfw", "eos"}
+
 MODEL = {
     "short": "nano-agent",
     "path": "/hf_models/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
@@ -59,9 +67,7 @@ MODEL = {
     "server_nodes": 1,
     "server_args": (
         "--dtype auto "
-        "--kv-cache-dtype fp8 "
         "--enable-expert-parallel "
-        "--attention-backend FLASH_ATTN "
         "--trust-remote-code "
         "--gpu-memory-utilization 0.9 "
         "--enable-chunked-prefill "
@@ -150,6 +156,9 @@ def main():
 
     bench_keys = [b.strip() for b in args.benchmarks.split(",")]
 
+    # Append H100-only vLLM flags only when targeting an H100/H200 cluster.
+    server_args = MODEL["server_args"] + (_H100_SERVER_ARGS if args.cluster in _H100_CLUSTERS else "")
+
     # cluster_config is used to resolve benchmark input paths in multi-agent mode
     cluster_config = get_cluster_config(args.cluster)
 
@@ -208,7 +217,7 @@ def main():
             server_type=MODEL["server_type"],
             server_gpus=MODEL["server_gpus"],
             server_nodes=MODEL["server_nodes"],
-            server_args=MODEL["server_args"],
+            server_args=server_args,
             with_sandbox=True,
             judge_model=JUDGE_MODEL,
             judge_server_type=JUDGE_SERVER_TYPE,
@@ -242,7 +251,7 @@ def main():
                 server_type=MODEL["server_type"],
                 server_gpus=MODEL["server_gpus"],
                 server_nodes=MODEL["server_nodes"],
-                server_args=MODEL["server_args"],
+                server_args=server_args,
                 input_file=benchmark_args.input_file,
                 output_dir=agent_odir,
                 with_sandbox=True,
