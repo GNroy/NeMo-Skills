@@ -14,26 +14,30 @@
 
 ## Results
 
-*Pending — jobs submitted 2026-04-30.*
+**Killed early by user — no accuracy data.**
 
-## Expected
+## Analysis
 
-With both bugs fixed:
-- Worker calls should succeed (0 `endpoint_type` crashes)
-- Orchestrator should emit tool calls on turn 1 (thinking disabled)
-- pass@1 target: recover toward or above r5 baseline (41%)
-- avg_tokens and gen_seconds should stay elevated (delegation overhead)
+Two new bugs surfaced after the r6 fixes landed:
 
-## Notes
+**Bug 1 — Worker HTTP timeout (100% of problems)**
+The orchestrator processes 100 problems with `max_concurrent_requests=512`,
+firing `call_solver_async` for all of them within seconds.  The worker server
+semaphore is 64, so 36 requests queue immediately.  Each worker call had
+`tokens_to_generate=None` + `enable_thinking=True`, meaning up to 131k tokens
+(~5 min) per call on the shared vLLM.  Queue wait + generation time routinely
+exceeded the 600s HTTP timeout.  Log evidence: 543 timeout errors in rs0 alone
+within the first 10 minutes; tqdm showed `2/100 [09:36<8:42:49, 320s/it]`.
 
-- Orchestrator has `tool_choice=required` (first turn forced) + `enable_thinking=False` + `orchestrator.yaml` mandate — all three levers active simultaneously
-- Worker retains `enable_thinking=True` (inherits from `InferenceConfig` default); the `code_agent` system prompt guides it to use Python tools
+**Bug 2 — `finish_reason` serialization**
+`ToolCallingWrapper.generate_async()` accumulates `finish_reason` per-turn as a
+list (e.g. `['tool_calls', 'tool_calls', 'stop']`) but never flattens it.
+`AgentTaskResponse.finish_reason: str | None` caused a pydantic validation error
+on every completed worker call that had run more than one turn.
 
-## Next steps
+## Next steps → r8
 
-After r7 results arrive:
-1. Check tool call success rate (should be near 100%)
-2. Check async vs blocking delegation ratio
-3. Compare pass@1 against r5 baseline
-4. If accuracy is lower than r5: investigate whether orchestrator's lack of thinking hurts synthesis quality; consider `enable_thinking=True` with a thinking budget cap
-5. If accuracy matches or exceeds r5: extend to physics and hle-physics benchmarks
+Fixes committed as `a38bf993`:
+1. `tool_call.py`: flatten `finish_reason` to last element
+2. `WORKER_EXTRA_ARGS`: `++inference.tokens_to_generate=32768` (caps per-call latency)
+3. Orchestrator: `++tool_overrides.CallAgentTool.timeout_s=1200`
