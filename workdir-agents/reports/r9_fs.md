@@ -10,12 +10,12 @@
 | Model | `NVIDIA-Nemotron-3-Nano-30B-A3B-BF16` (nano-agent) |
 | Key config changes | (1) `agent_server.py`: `require_tokenizer=True` when `tokens_to_generate` set — fixes tokenizer crash on worker code exec; (2) `tool_call.py`: `KeyError` handler with actionable error listing available tools — fixes silent `"solver"` tool-name mistake; (3) Tier 1 compaction: `++max_tool_output_tokens=2000` for workers (caps code exec output), `++tool_overrides.CallAgentTool.max_injection_tokens=4000` for orchestrator (caps worker result injections to ~16 KB) |
 | Commit | `d6479da2 fix: r9 — Tier 1 context compaction + worker reliability fixes` |
-| SLURM generation jobs | TBD |
-| SLURM eval jobs | TBD |
+| SLURM generation jobs | 9507540–9507544 (rs0–rs4) |
+| SLURM eval jobs | 9507517–9507518 |
 
 ## Results
 
-*Pending — submitted 2026-04-30.*
+*Pending — submitted 2026-04-30 ~14:57.*
 
 | Run | Mode | pass@1 (judge) | majority@5 | pass@5 | avg_tokens | gen_seconds |
 |-----|------|----------------|------------|--------|------------|-------------|
