@@ -18,6 +18,12 @@ AgentWorkerScript launches `nemo_skills.inference.agent_server` inside a
 het-group alongside its own LLM server.  The orchestrator (het-group 0)
 communicates with workers via HTTP; worker addresses are resolved lazily
 using SLURM_MASTER_NODE_HET_GROUP_N env vars.
+
+When all agents use the same model, pass `shared_server_script` pointing to
+the orchestrator's ServerScript and add this worker to het-group 0 instead of
+creating a new het-group.  The worker will connect to the orchestrator's LLM
+server (resolved via hostname_ref), and CallAgentTool will reach the worker at
+het_group=0 → SLURM_MASTER_NODE_HET_GROUP_0 (same node, localhost fallback).
 """
 
 import logging
@@ -56,6 +62,10 @@ class AgentWorkerScript(BaseJobScript):
 
     server_script: Optional[ServerScript] = None
     server_address_prehosted: Optional[str] = None
+    # When set, the worker reuses an existing LLM server (e.g. the orchestrator's)
+    # instead of starting its own.  The worker is then co-located in het-group 0
+    # alongside the orchestrator — no separate het-group or GPU allocation needed.
+    shared_server_script: Optional[ServerScript] = None
     extra_arguments: str = ""
     agent_port: Optional[int] = None
     allocate_port: bool = True
@@ -73,14 +83,17 @@ class AgentWorkerScript(BaseJobScript):
         def build_cmd() -> Tuple[str, Dict]:
             # Resolve LLM server address lazily (at job startup, after nemo-run
             # exports SLURM_MASTER_NODE_HET_GROUP_N env vars).
-            if self.server_script is not None:
-                server_host = self.server_script.hostname_ref()
-                server_port = self.server_script.port
+            # shared_server_script takes priority: the worker uses an existing LLM
+            # server from another component (e.g. orchestrator's server in het-group 0).
+            effective_server = self.shared_server_script or self.server_script
+            if effective_server is not None:
+                server_host = effective_server.hostname_ref()
+                server_port = effective_server.port
                 server_args = (
                     f"++server.host={server_host} "
                     f"++server.port={server_port} "
-                    f"++server.server_type={self.server_script.server_type} "
-                    f"++server.model={self.server_script.model_path} "
+                    f"++server.server_type={effective_server.server_type} "
+                    f"++server.model={effective_server.model_path} "
                 )
             elif self.server_address_prehosted is not None:
                 host, port = self.server_address_prehosted.rsplit(":", 1)

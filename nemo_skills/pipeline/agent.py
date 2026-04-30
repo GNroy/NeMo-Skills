@@ -87,6 +87,7 @@ LOG = logging.getLogger(get_logger_name(__file__))
 def _build_worker_agent_overrides(
     worker_names: List[str],
     worker_scripts: List[AgentWorkerScript],
+    het_groups: Optional[List[int]] = None,
 ) -> str:
     """Return Hydra++ args that wire CallAgentTool to the worker agents.
 
@@ -94,11 +95,13 @@ def _build_worker_agent_overrides(
       ++tool_overrides.CallAgentTool.agents.{name}.het_group={N}
       ++tool_overrides.CallAgentTool.agents.{name}.port={port}
 
-    Het-group indices start at 1 (group 0 is the orchestrator).
+    het_groups: explicit het-group index per worker.  When None, workers are
+    assigned indices starting at 1 (default multi-het-group layout).  Pass
+    [0, 0, ...] when workers are co-located in het-group 0 (shared LLM server).
     """
     parts = []
     for i, (name, worker) in enumerate(zip(worker_names, worker_scripts)):
-        het_group = i + 1  # workers start at het-group 1
+        het_group = het_groups[i] if het_groups is not None else (i + 1)
         parts.append(f"++tool_overrides.CallAgentTool.agents.{name}.het_group={het_group}")
         parts.append(f"++tool_overrides.CallAgentTool.agents.{name}.port={worker.agent_port}")
     return " ".join(parts)
@@ -158,6 +161,12 @@ def agent(
         [""],
         help="Extra Hydra++ args forwarded to each worker agent_server. "
         "Single value broadcasts.",
+    ),
+    worker_reuse_orchestrator_server: bool = typer.Option(
+        False,
+        help="Co-locate workers in het-group 0 so they share the orchestrator's LLM "
+        "server.  Avoids starting a redundant LLM server when all agents use the same "
+        "model.  Workers run as lightweight HTTP processes on the orchestrator's node.",
     ),
     worker_agent_port: int = typer.Option(
         7777,
@@ -329,11 +338,11 @@ def agent(
             groups: List[CommandGroup] = []
 
             # ----------------------------------------------------------
-            # Worker het-groups (1 .. N)
+            # Worker het-groups (1 .. N) — skipped when reusing orchestrator server
             # ----------------------------------------------------------
             worker_scripts: List[AgentWorkerScript] = []
 
-            if have_workers:
+            if have_workers and not worker_reuse_orchestrator_server:
                 for i, w_model in enumerate(worker_model):
                     w_name = worker_names[i]
                     w_server_type = worker_server_types[i]
@@ -394,10 +403,6 @@ def agent(
             # ----------------------------------------------------------
             orch_extra = orch_extra_args
 
-            # Auto-inject CallAgentTool worker address overrides
-            if have_workers:
-                orch_extra += " " + _build_worker_agent_overrides(worker_names, worker_scripts)
-
             # Build orchestrator server (may be None if pre-hosted)
             orch_server_script = None
             if orch_server_config is not None and int(orch_server_config.get("num_gpus", 0)) > 0:
@@ -439,6 +444,39 @@ def agent(
                         name=f"{task_name}_sandbox",
                     )
                 )
+
+            # ----------------------------------------------------------
+            # Co-located workers (shared LLM server, het-group 0)
+            # Workers are added to orch_components BEFORE the generation
+            # client so they start concurrently with the orchestrator.
+            # ----------------------------------------------------------
+            if have_workers and worker_reuse_orchestrator_server:
+                for i in range(len(worker_model)):
+                    w_name = worker_names[i]
+                    w_xargs = worker_xargs[i]
+
+                    w_worker = AgentWorkerScript(
+                        shared_server_script=orch_server_script,
+                        agent_name=w_name,
+                        agent_port=worker_agent_port,
+                        extra_arguments=w_xargs,
+                    )
+                    worker_scripts.append(w_worker)
+                    orch_components.append(
+                        Command(
+                            script=w_worker,
+                            container=main_container or cluster_config["containers"]["nemo-skills"],
+                            name=f"{task_name}_{w_name}",
+                        )
+                    )
+                # All co-located workers live in het-group 0 → CallAgentTool
+                # resolves them via SLURM_MASTER_NODE_HET_GROUP_0 (same node).
+                orch_extra += " " + _build_worker_agent_overrides(
+                    worker_names, worker_scripts, [0] * len(worker_names)
+                )
+            elif have_workers:
+                # Separate het-groups: workers already built above, inject overrides.
+                orch_extra += " " + _build_worker_agent_overrides(worker_names, worker_scripts)
 
             orch_client = GenerationClientScript(
                 output_dir=output_dir,

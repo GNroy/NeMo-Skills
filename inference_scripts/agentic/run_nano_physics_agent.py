@@ -113,9 +113,10 @@ PYTHON_TOOL = '++tool_modules=["nemo_skills.mcp.servers.python_tool::PythonTool"
 # Multi-agent: orchestrator delegates via CallAgentTool (no direct Python access).
 ORCHESTRATOR_TOOL = '++tool_modules=["nemo_skills.mcp.servers.agent_tool::CallAgentTool"] '
 
-# Worker gets PythonTool + code-execution system prompt.
+# Worker gets DirectPythonTool (runs code locally, no sandbox server needed)
+# + code-execution system prompt.
 WORKER_EXTRA_ARGS = (
-    '++tool_modules=["nemo_skills.mcp.servers.python_tool::PythonTool"] '
+    '++tool_modules=["nemo_skills.mcp.servers.python_tool::DirectPythonTool"] '
     '++system_message_yaml=agents/code_agent '
 )
 
@@ -252,6 +253,10 @@ def main():
                 worker_server_gpus=args.worker_gpus,
                 worker_names=args.worker_names,
                 worker_extra_args=[WORKER_EXTRA_ARGS],
+                # Workers share the orchestrator's LLM server (same model → no
+                # redundant vLLM instance).  Workers run as lightweight HTTP
+                # servers co-located in het-group 0.
+                worker_reuse_orchestrator_server=True,
             )
             agent(**agent_kwargs)
 
