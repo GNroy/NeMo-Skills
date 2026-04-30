@@ -182,11 +182,16 @@ def main():
         if args.worker_model:
             # Multi-agent: orchestrator delegates via CallAgentTool with orchestrator
             # system prompt; workers handle computation with PythonTool.
+            # Disable thinking for the orchestrator: the worker does the heavy
+            # reasoning; the orchestrator only needs to delegate and synthesize.
+            # Without this, the model exhausts its full 131k token budget in the
+            # <think> block before emitting a tool call (finish_reason=length).
             extra_args = (
                 base_args
                 + ORCHESTRATOR_TOOL
                 + "++system_message_yaml=agents/orchestrator "
                 + "++inference.extra_body.tool_choice=required "
+                + "++chat_template_kwargs.enable_thinking=False "
             )
         else:
             # Single-agent: one agent handles everything with PythonTool.

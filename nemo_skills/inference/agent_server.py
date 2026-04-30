@@ -203,6 +203,13 @@ class AgentServer:
                 # Remove stream from params — server mode uses non-streaming for simplicity
                 inference_params.pop("stream", None)
 
+                # endpoint_type is a field in InferenceConfig, so it ends up in
+                # inference_params after asdict().  Pop it before the call to avoid
+                # passing it twice (once explicitly, once via **inference_params).
+                endpoint_type_val = inference_params.pop("endpoint_type", EndpointType.chat)
+                if not isinstance(endpoint_type_val, EndpointType):
+                    endpoint_type_val = EndpointType(endpoint_type_val)
+
                 # Prepend system message if configured (e.g. for a code-execution worker).
                 messages = request.messages
                 if self._system_message:
@@ -210,7 +217,7 @@ class AgentServer:
 
                 result = await self.llm.generate_async(
                     prompt=messages,
-                    endpoint_type=EndpointType.chat,
+                    endpoint_type=endpoint_type_val,
                     **inference_params,
                 )
 
