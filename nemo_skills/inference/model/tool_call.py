@@ -100,7 +100,7 @@ class ToolCallingWrapper:
             raise
         except KeyError:
             # Model called a tool that isn't registered — give it an actionable error.
-            available = list(self.schema_mappings.keys()) or list(self.tool_manager._raw_to_qualified_map.keys())
+            available = list(self.tool_manager._raw_to_qualified_map.keys())
             LOG.warning(
                 "Model called unknown tool '%s'. Available: %s",
                 original_tool_name,
