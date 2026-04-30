@@ -91,6 +91,9 @@ class CallAgentTool(Tool):
     collect_results tool per worker set.
     """
 
+    # Approximate chars-per-token ratio, matching ToolCallingWrapper.
+    _CHARS_PER_TOKEN = 4
+
     def __init__(self) -> None:
         self._config: Dict[str, Any] = {
             # agents: {name: {het_group?: int, host?: str, port: int}}
@@ -99,6 +102,10 @@ class CallAgentTool(Tool):
             "timeout_s": _DEFAULT_TIMEOUT_S,
             # Role used when auto-injecting completed async results
             "injection_role": "user",
+            # If >= 0, truncate injected/collected worker results to this many
+            # tokens (tail kept).  Prevents long worker outputs from blowing
+            # up the orchestrator's context window.
+            "max_injection_tokens": -1,
         }
         # Resolved at configure() time: {name: url}
         self._agent_urls: Dict[str, str] = {}
@@ -342,7 +349,7 @@ class CallAgentTool(Tool):
                         "ticket_id": tid,
                         "status": "completed",
                         "agent": meta.get("agent_name", ""),
-                        "result": result_str,
+                        "result": self._truncate_result(result_str),
                     }
                 )
 
@@ -378,14 +385,14 @@ class CallAgentTool(Tool):
             except Exception as exc:
                 result = f"Error: {exc}"
 
-            # Cache so collect_results can still serve it if called later
+            # Cache the full result so collect_results can serve it later
             self._ticket_results[tid] = result
 
             meta = self._ticket_meta.get(tid, {})
             agent_name = meta.get("agent_name", "unknown")
             snippet = meta.get("task_snippet", "")
             label = f'[Async result for ticket {tid} — call_{agent_name}_async "{snippet}"]'
-            content = f"{label}:\n{result}"
+            content = f"{label}:\n{self._truncate_result(result)}"
 
             injections.append({"role": injection_role, "content": content})
             LOG.info(
@@ -425,6 +432,20 @@ class CallAgentTool(Tool):
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
+
+    def _truncate_result(self, result: str) -> str:
+        """Truncate a worker result to max_injection_tokens if configured."""
+        max_tokens = self._config.get("max_injection_tokens", -1)
+        if max_tokens < 0:
+            return result
+        max_chars = max_tokens * self._CHARS_PER_TOKEN
+        if len(result) <= max_chars:
+            return result
+        return (
+            f"[result truncated — {len(result)} chars total, "
+            f"showing last ~{max_tokens} tokens]\n"
+            + result[-max_chars:]
+        )
 
     def _get_url(self, agent_name: str) -> str:
         url = self._agent_urls.get(agent_name)

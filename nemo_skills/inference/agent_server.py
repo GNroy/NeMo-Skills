@@ -83,6 +83,7 @@ class AgentServerConfig:
     tool_overrides: dict = field(default_factory=dict)
     schema_overrides: dict = field(default_factory=dict)
     max_tool_calls: int = -1
+    max_tool_output_tokens: int = -1  # If >= 0, truncate each tool result to this many tokens (tail kept)
 
     # Sandbox configuration (for tools that need code execution)
     sandbox: dict = field(default_factory=dict)
@@ -168,7 +169,11 @@ class AgentServer:
                 tool_overrides=cfg.tool_overrides,
                 schema_overrides=cfg.schema_overrides,
                 max_tool_calls=cfg.max_tool_calls,
+                max_tool_output_tokens=cfg.max_tool_output_tokens,
                 additional_config={"sandbox": cfg.sandbox} if cfg.sandbox else {},
+                # Tokenizer is required when tokens_to_generate is set, so the
+                # wrapper can subtract tool-response tokens from the budget.
+                require_tokenizer=cfg.inference.tokens_to_generate is not None,
             )
         else:
             LOG.warning("AgentServer %s has no tool_modules; using plain model.", cfg.agent_name)

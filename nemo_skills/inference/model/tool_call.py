@@ -41,6 +41,11 @@ class ToolCallingWrapper:
     TODO(sanyamk): Supports only Chat Completions API for now.
     """
 
+    # Approximate chars-per-token ratio used for output truncation.
+    # Precise token counting requires a tokenizer; this constant avoids
+    # that dependency for the common truncation path.
+    _CHARS_PER_TOKEN = 4
+
     def __init__(
         self,
         model: BaseModel,
@@ -49,6 +54,7 @@ class ToolCallingWrapper:
         additional_config: dict | None = None,
         schema_overrides: dict | None = None,
         max_tool_calls: int = -1,
+        max_tool_output_tokens: int = -1,
     ):
         self.model = model
         additional_config = additional_config or {}
@@ -63,6 +69,7 @@ class ToolCallingWrapper:
         self.schema_overrides = load_schema_overrides(schema_overrides)
         self.schema_mappings = {}  # Built when tools are listed
         self.max_tool_calls = max_tool_calls
+        self.max_tool_output_tokens = max_tool_output_tokens
 
     async def _execute_tool_call(self, tool_call, request_id: str, endpoint_type: EndpointType):
         ## TODO(sanyamk): The correct key format needs to be cohesive with other formatters.
@@ -91,6 +98,21 @@ class ToolCallingWrapper:
         except FatalToolError:
             # Fatal errors should propagate up and stop the process
             raise
+        except KeyError:
+            # Model called a tool that isn't registered — give it an actionable error.
+            available = list(self.schema_mappings.keys()) or list(self.tool_manager._raw_to_qualified_map.keys())
+            LOG.warning(
+                "Model called unknown tool '%s'. Available: %s",
+                original_tool_name,
+                available,
+            )
+            return {
+                "error": (
+                    f"Unknown tool '{original_tool_name}'. "
+                    f"Available tools: {available}. "
+                    "Use the exact tool name from the list."
+                )
+            }
         except Exception as e:
             LOG.exception(e)
             return {"error": "Tool execution failed."}
@@ -104,7 +126,9 @@ class ToolCallingWrapper:
             tool_result = await self._execute_tool_call(tool_call, request_id=request_id, endpoint_type=endpoint_type)
             tool_results.append(tool_result)
         return [
-            format_tool_response_by_endpoint_type(tool_call, tool_result, endpoint_type)
+            self._truncate_tool_output(
+                format_tool_response_by_endpoint_type(tool_call, tool_result, endpoint_type)
+            )
             for tool_call, tool_result in zip(tool_calls, tool_results)
         ]
 
@@ -129,6 +153,28 @@ class ToolCallingWrapper:
             text = msg.get("content") or msg.get("output") or ""
             total += len(self.model.tokenizer.encode(str(text)))
         return total
+
+    def _truncate_tool_output(self, msg: dict) -> dict:
+        """Truncate tool result content to max_tool_output_tokens if set.
+
+        Keeps the tail of the output — the final result/error is almost always
+        at the end of code execution output.  Token count is approximated as
+        len(text) / _CHARS_PER_TOKEN to avoid requiring a tokenizer.
+        """
+        if self.max_tool_output_tokens < 0:
+            return msg
+        max_chars = self.max_tool_output_tokens * self._CHARS_PER_TOKEN
+        for key in ("content", "output"):
+            text = msg.get(key)
+            if isinstance(text, str) and len(text) > max_chars:
+                original_chars = len(text)
+                msg = dict(msg)  # shallow copy — don't mutate the original
+                msg[key] = (
+                    f"[output truncated — {original_chars} chars total, "
+                    f"showing last ~{self.max_tool_output_tokens} tokens]\n"
+                    + text[-max_chars:]
+                )
+        return msg
 
     def _coerce_tool_call_dict(self, tool_call: object) -> dict:
         if isinstance(tool_call, dict):

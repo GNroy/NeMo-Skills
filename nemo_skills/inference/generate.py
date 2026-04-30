@@ -202,6 +202,7 @@ class GenerationTaskConfig:
     schema_overrides: dict | None = field(default_factory=dict)
 
     max_tool_calls: int = -1  # If >= 0, will limit the number of tool calls executed during generation to this number
+    max_tool_output_tokens: int = -1  # If >= 0, truncate each tool result to this many tokens (tail kept; ~4 chars/token)
 
     # if True, will move full generation to _full_generation key and keep cfg.generation_key without thinking tokens
     # IMPORTANT: do not set this for non-reasoning models as it will make the generations empty!
@@ -482,6 +483,7 @@ class GenerationTask:
                 tool_overrides=self.cfg.tool_overrides,
                 schema_overrides=self.cfg.schema_overrides,
                 max_tool_calls=self.cfg.max_tool_calls,
+                max_tool_output_tokens=self.cfg.max_tool_output_tokens,
                 tokenizer=self.tokenizer,
                 require_tokenizer=self.cfg.inference.tokens_to_generate is not None,
                 additional_config={"sandbox": self.cfg.sandbox},

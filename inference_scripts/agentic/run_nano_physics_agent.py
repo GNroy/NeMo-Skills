@@ -128,6 +128,7 @@ WORKER_EXTRA_ARGS = (
     '++tool_modules=["nemo_skills.mcp.servers.python_tool::DirectPythonTool"] '
     '++system_message_yaml=agents/code_agent '
     '++inference.tokens_to_generate=32768 '
+    '++max_tool_output_tokens=2000 '
 )
 
 
@@ -200,6 +201,7 @@ def main():
                 # call_solver_async at once; worker semaphore=64 means up to 36 queue
                 # at any time, each waiting for a 32k-token worker call to free a slot.
                 + "++tool_overrides.CallAgentTool.timeout_s=1200 "
+                + "++tool_overrides.CallAgentTool.max_injection_tokens=4000 "
             )
         else:
             # Single-agent: one agent handles everything with PythonTool.
