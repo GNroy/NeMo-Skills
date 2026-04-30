@@ -23,7 +23,7 @@ system: |-
       Blocking call. Waits for the agent to finish and returns the result
       inline. Use when task B depends on the result of task A.
 
-  call_<name>_async(task) -> {"ticket_id": "...", "status": "pending"}
+  call_<name>_async(task) -> {{"ticket_id": "...", "status": "pending"}}
       Non-blocking call. The task is fired in the background and this tool
       returns a ticket_id immediately. While the agent works, you can
       continue reasoning or fire additional async tasks. When the agent
