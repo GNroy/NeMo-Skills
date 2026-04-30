@@ -27,6 +27,74 @@ git -c commit.gpgsign=false commit -m "..."
 
 ---
 
+## 0.5. Automated job completion monitoring
+
+After submitting an experiment, set up a `CronCreate` job to poll for
+completion and run analysis automatically — no manual `/loop` invocation
+needed.
+
+### How it works
+
+`CronCreate` schedules a self-contained prompt to fire at a cron interval.
+The runtime re-enters Claude with that prompt while the REPL is idle.  The
+prompt checks for the summarized results file on the cluster; if not ready it
+exits silently; when ready it runs the full analysis, updates the report,
+commits, and deletes itself.
+
+### Setting up the watcher
+
+After submitting a run, call `CronCreate` with:
+
+```
+cron:      3,18,33,48 * * * *   (every ~15 min, off :00/:30 to avoid fleet spikes)
+durable:   true                 (persist to disk, survive session restarts)
+recurring: true
+prompt:    <self-contained analysis prompt — see template below>
+```
+
+**The prompt must be fully self-contained** — it fires without any prior
+conversation context.  Always include:
+
+- Run ID, benchmark, cluster, SSH key path, SSH host
+- Full output path on the cluster
+- SLURM job IDs (for reference / manual cancellation)
+- Baseline metrics to compare against
+- What changes were applied in this run (so analysis can explain the delta)
+- Exact SSH + Python analysis commands (copy from §3)
+- Report file path to update
+- `git -c commit.gpgsign=false` commit command
+- `CronList` + `CronDelete` instructions to self-terminate on success
+
+### Completion signal
+
+Do **not** poll `squeue` — job IDs are hard to enumerate and the queue
+clears before the full pipeline (judge + summarize) finishes.  Instead,
+poll for the **summarized results log**:
+
+```bash
+ssh -i ~/.ssh/clusters/oci/id_ecdsa \
+    alaptev@draco-oci-login-01.draco-oci-iad.nvidia.com \
+    "ls /lustre/.../agent_{bench}-{model}-r{N}/eval-results/{benchmark}/summarized-results/main_*_srun.log 2>/dev/null"
+```
+
+This file only appears after generation + judge + summarize all complete.
+If it returns empty: exit silently.  If it returns a path: proceed with
+analysis.
+
+### Caveats
+
+- **Session lifetime**: `durable: true` should persist across restarts, but
+  in practice falls back to session-only in some environments — keep the
+  session open until the run completes.
+- **REPL must be idle**: the cron fires only when no query is in progress.
+- **Auto-expires after 7 days**: the runtime deletes the job automatically;
+  no orphan jobs.
+- **Self-termination**: the final step in the analysis prompt must call
+  `CronList` (to find the job ID) then `CronDelete`.  Hardcoding the ID in
+  the prompt is fragile since IDs are assigned at creation time.
+
+---
+
 ## 1. Iteration loop
 
 ```
