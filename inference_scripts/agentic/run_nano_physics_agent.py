@@ -97,7 +97,7 @@ BENCHMARKS = {
         "name": "physics",
         "split": None,          # defaults to EVAL_SPLIT = "test" from the benchmark module
         "num_random_seeds": 5,
-        "num_chunks": 10,
+        "num_chunks": 4,
     },
     "fs": {
         "name": "frontierscience-olympiad",
@@ -182,7 +182,12 @@ def main():
         if args.worker_model:
             # Multi-agent: orchestrator delegates via CallAgentTool with orchestrator
             # system prompt; workers handle computation with PythonTool.
-            extra_args = base_args + ORCHESTRATOR_TOOL + "++system_message_yaml=agents/orchestrator "
+            extra_args = (
+                base_args
+                + ORCHESTRATOR_TOOL
+                + "++system_message_yaml=agents/orchestrator "
+                + "++inference.extra_body.tool_choice=required "
+            )
         else:
             # Single-agent: one agent handles everything with PythonTool.
             extra_args = base_args + PYTHON_TOOL

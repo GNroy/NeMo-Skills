@@ -233,6 +233,11 @@ class ToolCallingWrapper:
         request_id = str(uuid.uuid4())
         tool_calls_executed = 0
 
+        # If tool_choice=required is set in extra_body, apply it only on the first turn.
+        # Subsequent turns revert to "auto" so the model can produce a final text answer.
+        _orig_extra_body = generation_kwargs.get('extra_body') or {}
+        _first_turn_tool_choice = _orig_extra_body.get('tool_choice')
+
         try:
             while True:
                 if isinstance(tokens_to_generate, int) and tokens_to_generate <= 0:
@@ -244,12 +249,19 @@ class ToolCallingWrapper:
                     if _injections:
                         conversation.extend(_injections)
 
+                if _first_turn_tool_choice and tool_calls_executed > 0:
+                    # After the first turn reset tool_choice so the model can stop calling tools
+                    _extra_body = {k: v for k, v in _orig_extra_body.items() if k != 'tool_choice'}
+                    _turn_kwargs = {**generation_kwargs, 'extra_body': _extra_body}
+                else:
+                    _turn_kwargs = generation_kwargs
+
                 generation = await self.model.generate_async(
                     prompt=conversation,
                     tools=tools,
                     tokens_to_generate=tokens_to_generate,
                     endpoint_type=endpoint_type,
-                    **generation_kwargs,
+                    **_turn_kwargs,
                 )
 
                 if isinstance(tokens_to_generate, int):
@@ -341,6 +353,9 @@ class ToolCallingWrapper:
         all_reasoning = []
         last_finish_reason = None
 
+        _orig_extra_body = generation_kwargs.get('extra_body') or {}
+        _first_turn_tool_choice = _orig_extra_body.get('tool_choice')
+
         try:
             while True:
                 if isinstance(tokens_to_generate, int) and tokens_to_generate <= 0:
@@ -352,13 +367,19 @@ class ToolCallingWrapper:
                     if _injections:
                         conversation.extend(_injections)
 
+                if _first_turn_tool_choice and total_tool_calls > 0:
+                    _extra_body = {k: v for k, v in _orig_extra_body.items() if k != 'tool_choice'}
+                    _turn_kwargs = {**generation_kwargs, 'extra_body': _extra_body}
+                else:
+                    _turn_kwargs = generation_kwargs
+
                 model_token_iterator = await self.model.generate_async(
                     prompt=conversation,
                     tools=tools,
                     tokens_to_generate=tokens_to_generate,
                     endpoint_type=endpoint_type,
                     stream=True,
-                    **generation_kwargs,
+                    **_turn_kwargs,
                 )
 
                 current_output_segment = ""
