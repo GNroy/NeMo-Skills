@@ -250,7 +250,11 @@ def main():
 
         agent(**agent_kwargs)
 
-        # eval() for judge + summarize; waits for agent() to finish.
+        # eval() for judge + summarize only; waits for agent() to finish.
+        # num_jobs=0 causes prepare_eval_commands() to return immediately with
+        # no generation job batches (early-return path), so no generation SLURM
+        # job is submitted.  Judge and summarize tasks still depend on the agent
+        # experiment via run_after=[name].
         eval_kwargs = dict(
             ctx=wrap_arguments(extra_args),
             cluster=args.cluster,
@@ -259,6 +263,7 @@ def main():
             benchmarks=f"{bcfg['name']}:{bcfg['num_random_seeds']}",
             split=bcfg["split"],
             num_chunks=bcfg["num_chunks"] if bcfg["num_chunks"] > 1 else None,
+            # generation params kept for reference but unused when num_jobs=0
             generation_module="nemo_skills.inference.agent_generate",
             model=MODEL["path"],
             server_type=MODEL["server_type"],
@@ -271,6 +276,7 @@ def main():
             judge_server_gpus=JUDGE_SERVER_GPUS,
             judge_server_args=JUDGE_SERVER_ARGS,
             run_after=[name],
+            num_jobs=0,
         )
         eval(**eval_kwargs)
         results.append((name, odir))
