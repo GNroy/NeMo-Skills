@@ -221,6 +221,12 @@ def main():
         default="gpt_solver",
         help="Agent name for the gpt-oss-120b worker (default: gpt_solver).",
     )
+    ap.add_argument(
+        "--attention-backend",
+        default=None,
+        help="Override vLLM attention backend for the nano server "
+             "(e.g. FLASH_ATTN, FLASHINFER). Default: let vLLM auto-select.",
+    )
     args = ap.parse_args()
 
     # Resolve cluster-specific hardware parameters.
@@ -237,10 +243,12 @@ def main():
     # H100-only vLLM flags when targeting an H100/H200/GB300 cluster.
     # --no-fp8 suppresses fp8 kv-cache for ablation runs.
     h100_args = "" if args.no_fp8 else (_H100_SERVER_ARGS if args.cluster in _H100_CLUSTERS else "")
+    attn_args = f"--attention-backend {args.attention_backend} " if args.attention_backend else ""
     server_args = (
         MODEL["server_args"]
         + f"--reasoning-parser-plugin {cparams['reasoning_parser_path']} "
         + h100_args
+        + attn_args
     )
 
     # cluster_config is used to resolve benchmark input paths in multi-agent mode
