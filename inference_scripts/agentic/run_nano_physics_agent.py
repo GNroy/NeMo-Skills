@@ -15,7 +15,9 @@ after generation completes, with skip_filled=True ensuring already-generated
 outputs are never re-processed.
 
 Worker agents can be added via --worker-model / --worker-names to test
-multi-agent setups without changing the orchestrator config.
+multi-agent setups.  --gpt-worker additionally attaches gpt-oss-120b as a
+second worker so the orchestrator can fire non-blocking parallel calls to
+both workers and pick the best answer (or fall back if one returns nothing).
 
 Usage:
     # Single agent, physics benchmark
@@ -25,10 +27,14 @@ Usage:
     python inference_scripts/agentic/run_nano_physics_agent.py --run-id 1 \\
         --benchmarks physics --dry-run
 
-    # Multi-agent: orchestrator + one worker
+    # Multi-agent: orchestrator + one nano worker
     python inference_scripts/agentic/run_nano_physics_agent.py --run-id 1 \\
-        --worker-model /hf_models/worker-model \\
-        --worker-gpus 4 --worker-names analyst
+        --worker-model /hf_models/worker-model --worker-names nano_solver
+
+    # Multi-agent: orchestrator + nano worker + gpt-oss-120b worker
+    python inference_scripts/agentic/run_nano_physics_agent.py --run-id 1 \\
+        --worker-model /hf_models/worker-model --worker-names nano_solver \\
+        --gpt-worker
 """
 
 import argparse
@@ -144,20 +150,30 @@ PYTHON_TOOL = '++tool_modules=["nemo_skills.mcp.servers.python_tool::PythonTool"
 # Multi-agent: orchestrator delegates via CallAgentTool (no direct Python access).
 ORCHESTRATOR_TOOL = '++tool_modules=["nemo_skills.mcp.servers.agent_tool::CallAgentTool"] '
 
-# Worker gets DirectPythonTool (runs code locally, no sandbox server needed)
-# + code-execution system prompt.
+# Nano worker: DirectPythonTool + code-execution system prompt + thinking enabled.
 # tokens_to_generate is capped to prevent per-call queue time from exceeding
-# the orchestrator's HTTP timeout when 100 concurrent problems all fire
-# call_solver_async simultaneously (worker semaphore=64, shared vLLM server).
-WORKER_EXTRA_ARGS = (
+# the orchestrator's HTTP timeout when many concurrent problems fire simultaneously.
+# Thinking is re-enabled: within the 32k budget it helps code quality without
+# exhausting the generation limit (the issue in r6–r11 was the *orchestrator*
+# thinking, not the worker).
+NANO_WORKER_EXTRA_ARGS = (
     '++tool_modules=["nemo_skills.mcp.servers.python_tool::DirectPythonTool"] '
     '++system_message_yaml=agents/code_agent '
     '++inference.tokens_to_generate=32768 '
     '++max_tool_output_tokens=2000 '
-    # Disable thinking for the worker: the worker writes and executes code, so
-    # deep reasoning wastes the 32768-token budget and produces empty generation.
-    '++chat_template_kwargs.enable_thinking=False '
+    '++chat_template_kwargs.enable_thinking=True '
 )
+
+# GPT-OSS-120B worker: same code-execution setup; no thinking flags (not supported).
+GPT_WORKER_EXTRA_ARGS = (
+    '++tool_modules=["nemo_skills.mcp.servers.python_tool::DirectPythonTool"] '
+    '++system_message_yaml=agents/code_agent '
+    '++inference.tokens_to_generate=32768 '
+    '++max_tool_output_tokens=2000 '
+)
+
+# vLLM server args for the gpt-oss-120b worker (same model as judge).
+GPT_WORKER_SERVER_ARGS = JUDGE_SERVER_ARGS
 
 
 def main():
@@ -190,6 +206,20 @@ def main():
         "--no-fp8",
         action="store_true",
         help="Disable fp8 kv-cache even on H100/GB300 clusters (use for ablation).",
+    )
+    ap.add_argument(
+        "--gpt-worker",
+        action="store_true",
+        help=(
+            "Add gpt-oss-120b as an additional worker alongside any --worker-model "
+            "workers. The orchestrator can dispatch to both in parallel and pick the "
+            "best answer. Forces worker_reuse_orchestrator_server=False."
+        ),
+    )
+    ap.add_argument(
+        "--gpt-worker-name",
+        default="gpt_solver",
+        help="Agent name for the gpt-oss-120b worker (default: gpt_solver).",
     )
     args = ap.parse_args()
 
@@ -228,12 +258,14 @@ def main():
         print(f"  benchmark:  {bcfg['name']}  ({bcfg['num_random_seeds']} seeds)")
         print(f"  cluster:    {args.cluster}")
         print(f"  output:     {odir}")
-        print(f"  workers:    {args.worker_model or '(none — single agent)'}")
+        all_workers = list(args.worker_model) + ([JUDGE_MODEL] if args.gpt_worker else [])
+        print(f"  workers:    {all_workers or '(none — single agent)'}")
         print(f"{'=' * 60}")
 
         base_args = MODEL["sampling_args"] + MODEL["inference_args"] + f"++max_tool_calls={args.max_tool_calls} "
 
-        if args.worker_model:
+        have_workers = bool(args.worker_model) or args.gpt_worker
+        if have_workers:
             # Multi-agent: orchestrator delegates via CallAgentTool with orchestrator
             # system prompt; workers handle computation with PythonTool.
             # Disable thinking for the orchestrator: the worker does the heavy
@@ -260,10 +292,15 @@ def main():
             print("  [DRY] orchestrator args:")
             for token in extra_args.strip().split():
                 print(f"    {token}")
-            if args.worker_model:
-                print("  [DRY] worker args:")
-                for token in WORKER_EXTRA_ARGS.strip().split():
-                    print(f"    {token}")
+            if have_workers:
+                for i, (wm, wargs) in enumerate(zip(
+                    list(args.worker_model) + ([JUDGE_MODEL] if args.gpt_worker else []),
+                    [NANO_WORKER_EXTRA_ARGS] * len(args.worker_model)
+                    + ([GPT_WORKER_EXTRA_ARGS] if args.gpt_worker else []),
+                )):
+                    print(f"  [DRY] worker {i} ({wm}) args:")
+                    for token in wargs.strip().split():
+                        print(f"    {token}")
             results.append((name, odir))
             continue
 
@@ -305,16 +342,39 @@ def main():
             num_chunks=bcfg["num_chunks"] if bcfg["num_chunks"] > 1 else None,
         )
 
-        if args.worker_model:
+        if have_workers:
+            # Build per-worker lists.  Nano workers (--worker-model) share the
+            # orchestrator's server when no gpt worker is present; adding gpt-oss-120b
+            # forces a separate server for every worker (different model).
+            worker_models = list(args.worker_model)
+            worker_types = list(args.worker_server_type)
+            worker_xargs = [NANO_WORKER_EXTRA_ARGS] * len(worker_models)
+            # Nano worker gets the same vLLM server args as the orchestrator.
+            worker_sargs = [server_args] * len(worker_models)
+            worker_gpus_list = [worker_gpus] * len(worker_models)
+            worker_names = list(args.worker_names) if args.worker_names else None
+
+            if args.gpt_worker:
+                worker_models.append(JUDGE_MODEL)
+                worker_types.append(JUDGE_SERVER_TYPE)
+                worker_xargs.append(GPT_WORKER_EXTRA_ARGS)
+                worker_sargs.append(GPT_WORKER_SERVER_ARGS)
+                worker_gpus_list.append(judge_server_gpus)
+                if worker_names is not None:
+                    worker_names.append(args.gpt_worker_name)
+                else:
+                    worker_names = [args.gpt_worker_name]
+
             agent_kwargs.update(
-                worker_model=args.worker_model,
-                worker_server_type=args.worker_server_type,
-                worker_server_gpus=[worker_gpus],
-                worker_names=args.worker_names,
-                worker_extra_args=[WORKER_EXTRA_ARGS],
-                # Workers share the orchestrator's LLM server (same model → no
-                # redundant vLLM instance).
-                worker_reuse_orchestrator_server=True,
+                worker_model=worker_models,
+                worker_server_type=worker_types,
+                worker_server_gpus=worker_gpus_list,
+                worker_server_args=worker_sargs,
+                worker_names=worker_names,
+                worker_extra_args=worker_xargs,
+                # Reuse orchestrator server only when all workers use the same model
+                # (nano only).  Adding gpt-oss-120b requires its own server.
+                worker_reuse_orchestrator_server=not args.gpt_worker,
             )
 
         agent(**agent_kwargs)
