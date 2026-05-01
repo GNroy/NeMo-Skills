@@ -343,13 +343,14 @@ def main():
         )
 
         if have_workers:
-            # Build per-worker lists.  Nano workers (--worker-model) share the
-            # orchestrator's server when no gpt worker is present; adding gpt-oss-120b
-            # forces a separate server for every worker (different model).
+            # Build per-worker lists.  agent() auto-deduplicates LLM servers:
+            # workers whose model matches the orchestrator are co-located (het-group 0);
+            # workers sharing a non-orchestrator model share one server in one het-group.
+            # No manual reuse flag needed.
             worker_models = list(args.worker_model)
             worker_types = list(args.worker_server_type)
             worker_xargs = [NANO_WORKER_EXTRA_ARGS] * len(worker_models)
-            # Nano worker gets the same vLLM server args as the orchestrator.
+            # Nano worker: same server args as orchestrator (triggers co-location).
             worker_sargs = [server_args] * len(worker_models)
             worker_gpus_list = [worker_gpus] * len(worker_models)
             worker_names = list(args.worker_names) if args.worker_names else None
@@ -372,9 +373,6 @@ def main():
                 worker_server_args=worker_sargs,
                 worker_names=worker_names,
                 worker_extra_args=worker_xargs,
-                # Reuse orchestrator server only when all workers use the same model
-                # (nano only).  Adding gpt-oss-120b requires its own server.
-                worker_reuse_orchestrator_server=not args.gpt_worker,
             )
 
         agent(**agent_kwargs)

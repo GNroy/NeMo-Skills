@@ -14,10 +14,19 @@
 
 """Pipeline command for multi-agent SLURM jobs.
 
-ns agent creates a heterogeneous SLURM job with:
-  Het-group 0  — orchestrator: LLM server A + agent_generate (batch mode)
-  Het-group 1  — worker "name_0": LLM server B + agent_server (HTTP mode)
-  Het-group N  — worker "name_N-1": LLM server N + agent_server (HTTP mode)
+ns agent creates a heterogeneous SLURM job.  Each unique (model, server_type)
+pair among the orchestrator and workers is deployed exactly once:
+
+  Het-group 0  — orchestrator LLM server + agent_generate + any co-located
+                 workers that share the orchestrator's model
+  Het-group 1  — first non-orchestrator model: shared LLM server + all agent
+                 workers using that model (N agent processes, one server)
+  Het-group K  — Kth distinct non-orchestrator model: similar layout
+
+Workers whose model matches the orchestrator are co-located in het-group 0
+with no extra GPU allocation.  Workers sharing a non-orchestrator model share
+one server in one het-group, each running as a separate HTTP process on
+different ports.  This deduplication is automatic — no flag needed.
 
 For single-agent usage (no --worker-model), this degrades to a simple
 generate job using nemo_skills.inference.agent_generate instead of
@@ -162,11 +171,12 @@ def agent(
         help="Extra Hydra++ args forwarded to each worker agent_server. "
         "Single value broadcasts.",
     ),
-    worker_reuse_orchestrator_server: bool = typer.Option(
-        False,
-        help="Co-locate workers in het-group 0 so they share the orchestrator's LLM "
-        "server.  Avoids starting a redundant LLM server when all agents use the same "
-        "model.  Workers run as lightweight HTTP processes on the orchestrator's node.",
+    worker_reuse_orchestrator_server: Optional[bool] = typer.Option(
+        None,
+        hidden=True,
+        help="Deprecated — server reuse is now automatic.  Workers whose model matches "
+        "the orchestrator are co-located in het-group 0; workers sharing the same "
+        "non-orchestrator model share one het-group.  This flag is ignored.",
     ),
     worker_agent_port: int = typer.Option(
         7777,
@@ -338,72 +348,11 @@ def agent(
             groups: List[CommandGroup] = []
 
             # ----------------------------------------------------------
-            # Worker het-groups (1 .. N) — skipped when reusing orchestrator server
-            # ----------------------------------------------------------
-            worker_scripts: List[AgentWorkerScript] = []
-
-            if have_workers and not worker_reuse_orchestrator_server:
-                for i, w_model in enumerate(worker_model):
-                    w_name = worker_names[i]
-                    w_server_type = worker_server_types[i]
-                    w_gpus = worker_gpus[i]
-                    w_nodes = worker_nodes[i]
-                    w_args = worker_args[i]
-                    w_xargs = worker_xargs[i]
-
-                    w_container = cluster_config["containers"].get(w_server_type, "")
-
-                    w_server = ServerScript(
-                        server_type=w_server_type,
-                        model_path=w_model,
-                        cluster_config=cluster_config,
-                        num_gpus=w_gpus,
-                        num_nodes=w_nodes,
-                        server_args=w_args,
-                        allocate_port=True,
-                    )
-
-                    w_worker = AgentWorkerScript(
-                        server_script=w_server,
-                        agent_name=w_name,
-                        agent_port=worker_agent_port,
-                        extra_arguments=w_xargs,
-                    )
-
-                    worker_scripts.append(w_worker)
-
-                    w_server_cmd = Command(
-                        script=w_server,
-                        container=w_container,
-                        name=f"{task_name}_{w_name}_server",
-                    )
-                    w_worker_cmd = Command(
-                        script=w_worker,
-                        container=main_container or cluster_config["containers"]["nemo-skills"],
-                        name=f"{task_name}_{w_name}",
-                    )
-                    groups.append(
-                        CommandGroup(
-                            commands=[w_server_cmd, w_worker_cmd],
-                            hardware=HardwareConfig(
-                                partition=partition,
-                                account=account,
-                                num_gpus=w_gpus,
-                                num_nodes=w_nodes,
-                                num_tasks=w_server.num_tasks,
-                                sbatch_kwargs=sbatch_kwargs,
-                            ),
-                            name=f"{task_name}_{w_name}_group",
-                            log_dir=log_dir,
-                        )
-                    )
-
-            # ----------------------------------------------------------
             # Orchestrator het-group (group 0)
             # ----------------------------------------------------------
             orch_extra = orch_extra_args
 
-            # Build orchestrator server (may be None if pre-hosted)
+            # Build orchestrator server early so co-located workers can reference it.
             orch_server_script = None
             if orch_server_config is not None and int(orch_server_config.get("num_gpus", 0)) > 0:
                 orch_container = orch_server_config.get("container") or cluster_config["containers"][server_type_str]
@@ -446,37 +395,142 @@ def agent(
                 )
 
             # ----------------------------------------------------------
-            # Co-located workers (shared LLM server, het-group 0)
-            # Workers are added to orch_components BEFORE the generation
-            # client so they start concurrently with the orchestrator.
+            # Workers: deduplicate LLM servers by (model_path, server_type).
+            #
+            # Each unique (model, type) pair gets exactly one LLM server.
+            # Workers whose model matches the orchestrator are co-located in
+            # het-group 0 and share its server (no extra GPU allocation).
+            # Workers sharing a non-orchestrator model are placed together in
+            # one het-group with a single shared server.  Workers with a unique
+            # model each occupy their own het-group.
+            #
+            # This ensures every model is deployed exactly once regardless of
+            # how many agents use it, scaling naturally as more workers are added.
             # ----------------------------------------------------------
-            if have_workers and worker_reuse_orchestrator_server:
-                for i in range(len(worker_model)):
-                    w_name = worker_names[i]
-                    w_xargs = worker_xargs[i]
+            # per-worker result — populated below
+            worker_scripts: List[AgentWorkerScript] = [None] * num_workers  # type: ignore[list-item]
+            worker_het_groups: List[int] = [0] * num_workers
 
-                    w_worker = AgentWorkerScript(
-                        shared_server_script=orch_server_script,
-                        agent_name=w_name,
-                        agent_port=worker_agent_port,
-                        extra_arguments=w_xargs,
+            if have_workers:
+                if worker_reuse_orchestrator_server is not None:
+                    LOG.warning(
+                        "--worker-reuse-orchestrator-server is deprecated and ignored; "
+                        "server reuse is now determined automatically from model paths."
                     )
-                    worker_scripts.append(w_worker)
-                    orch_components.append(
-                        Command(
-                            script=w_worker,
-                            container=main_container or cluster_config["containers"]["nemo-skills"],
-                            name=f"{task_name}_{w_name}",
-                        )
-                    )
-                # All co-located workers live in het-group 0 → CallAgentTool
-                # resolves them via SLURM_MASTER_NODE_HET_GROUP_0 (same node).
-                orch_extra += " " + _build_worker_agent_overrides(
-                    worker_names, worker_scripts, [0] * len(worker_names)
+
+                orch_key = (model, server_type_str)
+
+                # Group worker indices by (model_path, server_type)
+                server_key_to_indices: Dict[tuple, list] = {}
+                for i in range(num_workers):
+                    key = (worker_model[i], worker_server_types[i])
+                    server_key_to_indices.setdefault(key, []).append(i)
+
+                LOG.info(
+                    "Worker server groups: %s",
+                    {f"{k[0]} ({k[1]})": idxs for k, idxs in server_key_to_indices.items()},
                 )
-            elif have_workers:
-                # Separate het-groups: workers already built above, inject overrides.
-                orch_extra += " " + _build_worker_agent_overrides(worker_names, worker_scripts)
+
+                next_het_group = 1  # het-group 0 is always the orchestrator
+
+                for key, indices in server_key_to_indices.items():
+                    w_model_path, w_server_type = key
+
+                    if key == orch_key:
+                        # ── Co-locate: share orchestrator server in het-group 0 ──
+                        # No new server or het-group needed; workers run as
+                        # lightweight HTTP processes alongside the orchestrator.
+                        LOG.info(
+                            "Workers %s share the orchestrator server (het-group 0)",
+                            [worker_names[i] for i in indices],
+                        )
+                        for i in indices:
+                            w_worker = AgentWorkerScript(
+                                shared_server_script=orch_server_script,
+                                agent_name=worker_names[i],
+                                agent_port=worker_agent_port,
+                                extra_arguments=worker_xargs[i],
+                            )
+                            worker_scripts[i] = w_worker
+                            worker_het_groups[i] = 0
+                            orch_components.append(
+                                Command(
+                                    script=w_worker,
+                                    container=main_container or cluster_config["containers"]["nemo-skills"],
+                                    name=f"{task_name}_{worker_names[i]}",
+                                )
+                            )
+                    else:
+                        # ── Shared server: one server for all workers in this group ──
+                        # Deploy exactly one LLM server for this (model, type) pair;
+                        # all workers in the group reference it via shared_server_script.
+                        first = indices[0]
+                        w_container = cluster_config["containers"].get(w_server_type, "")
+                        this_het_group = next_het_group
+                        next_het_group += 1
+
+                        shared_server = ServerScript(
+                            server_type=w_server_type,
+                            model_path=w_model_path,
+                            cluster_config=cluster_config,
+                            num_gpus=worker_gpus[first],
+                            num_nodes=worker_nodes[first],
+                            server_args=worker_args[first],
+                            allocate_port=True,
+                        )
+                        LOG.info(
+                            "Workers %s share a new %s server in het-group %d (%d GPU(s))",
+                            [worker_names[i] for i in indices],
+                            w_model_path,
+                            this_het_group,
+                            worker_gpus[first],
+                        )
+
+                        group_commands = [
+                            Command(
+                                script=shared_server,
+                                container=w_container,
+                                name=f"{task_name}_{w_model_path.split('/')[-1]}_server",
+                            )
+                        ]
+
+                        for i in indices:
+                            w_worker = AgentWorkerScript(
+                                shared_server_script=shared_server,
+                                agent_name=worker_names[i],
+                                agent_port=worker_agent_port,
+                                extra_arguments=worker_xargs[i],
+                            )
+                            worker_scripts[i] = w_worker
+                            worker_het_groups[i] = this_het_group
+                            group_commands.append(
+                                Command(
+                                    script=w_worker,
+                                    container=main_container or cluster_config["containers"]["nemo-skills"],
+                                    name=f"{task_name}_{worker_names[i]}",
+                                )
+                            )
+
+                        groups.append(
+                            CommandGroup(
+                                commands=group_commands,
+                                hardware=HardwareConfig(
+                                    partition=partition,
+                                    account=account,
+                                    num_gpus=worker_gpus[first],
+                                    num_nodes=worker_nodes[first],
+                                    num_tasks=shared_server.num_tasks,
+                                    sbatch_kwargs=sbatch_kwargs,
+                                ),
+                                name=f"{task_name}_{w_model_path.split('/')[-1]}_group",
+                                log_dir=log_dir,
+                            )
+                        )
+
+                # Wire all workers into the orchestrator's CallAgentTool overrides
+                orch_extra += " " + _build_worker_agent_overrides(
+                    worker_names, worker_scripts, worker_het_groups
+                )
 
             orch_client = GenerationClientScript(
                 output_dir=output_dir,
