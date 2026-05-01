@@ -82,7 +82,7 @@ CLUSTER_PARAMS = {
         # Model loaded from HF cache (copied from OCI); Hub ID triggers cache lookup.
         "model_path": "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
         # Parser file copied from OCI (igitman's llm/hf_models) to alaptev's home.
-        "reasoning_parser_path": "/alaptev/nano_v3_reasoning_parser.py",
+        "reasoning_parser_path": "/alaptev/reasoning_parsers/nano_v3_reasoning_parser.py",
     },
 }
 _DEFAULT_CLUSTER_PARAMS = CLUSTER_PARAMS["oci"]
