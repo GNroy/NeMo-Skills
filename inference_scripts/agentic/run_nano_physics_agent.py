@@ -129,6 +129,9 @@ WORKER_EXTRA_ARGS = (
     '++system_message_yaml=agents/code_agent '
     '++inference.tokens_to_generate=32768 '
     '++max_tool_output_tokens=2000 '
+    # Disable thinking for the worker: the worker writes and executes code, so
+    # deep reasoning wastes the 32768-token budget and produces empty generation.
+    '++chat_template_kwargs.enable_thinking=False '
 )
 
 
@@ -154,8 +157,10 @@ def main():
     ap.add_argument(
         "--max-tool-calls",
         type=int,
-        default=50,
-        help="Max tool calls per problem (caps runaway agentic loops)",
+        default=15,
+        help="Max tool calls per problem (caps runaway agentic loops). "
+             "Multi-agent orchestrator typically uses 4-8 calls; 15 gives "
+             "headroom while preventing runaway loops that exhaust the 4h SLURM timeout.",
     )
     args = ap.parse_args()
 

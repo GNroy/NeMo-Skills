@@ -91,6 +91,9 @@ class AgentServerConfig:
     # LLM call parameters
     inference: InferenceConfig = field(default_factory=InferenceConfig)
 
+    # Chat template kwargs forwarded to generate_async (e.g. enable_thinking=False)
+    chat_template_kwargs: dict = field(default_factory=dict)
+
     # Concurrency: max simultaneous in-flight task requests
     max_concurrent_tasks: int = 64
 
@@ -214,6 +217,13 @@ class AgentServer:
                 endpoint_type_val = inference_params.pop("endpoint_type", EndpointType.chat)
                 if not isinstance(endpoint_type_val, EndpointType):
                     endpoint_type_val = EndpointType(endpoint_type_val)
+
+                # Merge chat_template_kwargs into extra_body (same pattern as generate.py).
+                # This controls model-specific settings like enable_thinking for nano-v3.
+                if self.cfg.chat_template_kwargs and endpoint_type_val != EndpointType.text:
+                    extra_body = dict(inference_params.get("extra_body") or {})
+                    extra_body["chat_template_kwargs"] = dict(self.cfg.chat_template_kwargs)
+                    inference_params["extra_body"] = extra_body
 
                 # Prepend system message if configured (e.g. for a code-execution worker).
                 messages = request.messages
