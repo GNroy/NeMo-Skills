@@ -57,7 +57,7 @@ _H100_SERVER_ARGS = (
     "--kv-cache-dtype fp8 "
     "--attention-backend FLASH_ATTN "
 )
-_H100_CLUSTERS = {"dfw", "eos"}
+_H100_CLUSTERS = {"dfw", "eos", "aws-cmh"}  # GB300 also supports fp8 + flash attn
 
 MODEL = {
     "short": "nano-agent",
@@ -151,6 +151,9 @@ def main():
         default=[],
         help="Model path(s) for worker agent(s). Enables multi-agent mode.",
     )
+    ap.add_argument("--server-gpus", type=int, default=MODEL["server_gpus"],
+                    help="GPUs for the main model server (default: 8 for OCI/A100; use 4 for aws-cmh/GB300)")
+    ap.add_argument("--server-nodes", type=int, default=MODEL["server_nodes"])
     ap.add_argument("--worker-server-type", nargs="+", default=["vllm"])
     ap.add_argument("--worker-gpus", nargs="+", type=int, default=[8])
     ap.add_argument("--worker-names", nargs="+", default=None)
@@ -249,8 +252,8 @@ def main():
             expname=name,
             model=MODEL["path"],
             server_type=MODEL["server_type"],
-            server_gpus=MODEL["server_gpus"],
-            server_nodes=MODEL["server_nodes"],
+            server_gpus=args.server_gpus,
+            server_nodes=args.server_nodes,
             server_args=server_args,
             input_file=benchmark_args.input_file,
             output_dir=agent_odir,
@@ -292,8 +295,8 @@ def main():
             generation_module="nemo_skills.inference.agent_generate",
             model=MODEL["path"],
             server_type=MODEL["server_type"],
-            server_gpus=MODEL["server_gpus"],
-            server_nodes=MODEL["server_nodes"],
+            server_gpus=args.server_gpus,
+            server_nodes=args.server_nodes,
             server_args=server_args,
             with_sandbox=True,
             judge_model=JUDGE_MODEL,
