@@ -52,11 +52,10 @@ JUDGE_SERVER_ARGS = "--async-scheduling --max-model-len 131072"
 
 # vLLM flags that require NVIDIA compute capability ≥ 9.0 (H100/H200/GB300).
 # OCI uses A100 (cc 8.0) — these are appended only for clusters in _H100_CLUSTERS.
-_H100_SERVER_ARGS = (
-    "--kv-cache-dtype fp8 "
-    "--attention-backend FLASH_ATTN "
-)
-_H100_CLUSTERS = {"dfw", "eos", "aws-cmh"}  # GB300 also supports fp8 + flash attn
+# Note: FLASH_ATTN backend does NOT support fp8 kv-cache in vLLM 0.18.x; omit it
+# and let vLLM auto-select an fp8-compatible backend (e.g. FlashInfer on H100/GB300).
+_H100_SERVER_ARGS = "--kv-cache-dtype fp8 "
+_H100_CLUSTERS = {"dfw", "eos", "aws-cmh"}  # GB300 also supports fp8 kv-cache
 
 # Per-cluster hardware parameters.  Each entry overrides the corresponding
 # MODEL/judge defaults for that cluster.
@@ -68,6 +67,7 @@ CLUSTER_PARAMS = {
         "worker_gpus": 8,
         "judge_server_gpus": 8,
         "model_path": "/hf_models/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
+        # nano_v3_reasoning_parser.py ships alongside the model in igitman's /hf_models.
         "reasoning_parser_path": (
             "/hf_models/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16/nano_v3_reasoning_parser.py"
         ),
@@ -81,11 +81,8 @@ CLUSTER_PARAMS = {
         "judge_server_gpus": 4,
         # Model loaded from HF cache (copied from OCI); Hub ID triggers cache lookup.
         "model_path": "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
-        "reasoning_parser_path": (
-            "/alaptev/hf-cache/models--nvidia--NVIDIA-Nemotron-3-Nano-30B-A3B-BF16"
-            "/snapshots/5a48de7e98cce824b3456eb9857ded839c3b6475"
-            "/nano_v3_reasoning_parser.py"
-        ),
+        # Parser file copied from OCI (igitman's llm/hf_models) to alaptev's home.
+        "reasoning_parser_path": "/alaptev/nano_v3_reasoning_parser.py",
     },
 }
 _DEFAULT_CLUSTER_PARAMS = CLUSTER_PARAMS["oci"]
