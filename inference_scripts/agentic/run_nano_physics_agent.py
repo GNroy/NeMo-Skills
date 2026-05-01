@@ -186,6 +186,11 @@ def main():
              "Multi-agent orchestrator typically uses 4-8 calls; 15 gives "
              "headroom while preventing runaway loops that exhaust the 4h SLURM timeout.",
     )
+    ap.add_argument(
+        "--no-fp8",
+        action="store_true",
+        help="Disable fp8 kv-cache even on H100/GB300 clusters (use for ablation).",
+    )
     args = ap.parse_args()
 
     # Resolve cluster-specific hardware parameters.
@@ -200,10 +205,12 @@ def main():
 
     # Inject cluster-specific reasoning-parser-plugin path, then append
     # H100-only vLLM flags when targeting an H100/H200/GB300 cluster.
+    # --no-fp8 suppresses fp8 kv-cache for ablation runs.
+    h100_args = "" if args.no_fp8 else (_H100_SERVER_ARGS if args.cluster in _H100_CLUSTERS else "")
     server_args = (
         MODEL["server_args"]
         + f"--reasoning-parser-plugin {cparams['reasoning_parser_path']} "
-        + (_H100_SERVER_ARGS if args.cluster in _H100_CLUSTERS else "")
+        + h100_args
     )
 
     # cluster_config is used to resolve benchmark input paths in multi-agent mode
