@@ -67,6 +67,10 @@ CLUSTER_PARAMS = {
         "server_nodes": 1,
         "worker_gpus": 8,
         "judge_server_gpus": 8,
+        "model_path": "/hf_models/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
+        "reasoning_parser_path": (
+            "/hf_models/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16/nano_v3_reasoning_parser.py"
+        ),
     },
     "aws-cmh": {
         # GB300 288 GB HBM/GPU, 4 GPUs/node — single node is sufficient for
@@ -75,14 +79,22 @@ CLUSTER_PARAMS = {
         "server_nodes": 1,
         "worker_gpus": 4,
         "judge_server_gpus": 4,
+        # Model loaded from HF cache (copied from OCI); Hub ID triggers cache lookup.
+        "model_path": "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
+        "reasoning_parser_path": (
+            "/alaptev/hf-cache/models--nvidia--NVIDIA-Nemotron-3-Nano-30B-A3B-BF16"
+            "/snapshots/5a48de7e98cce824b3456eb9857ded839c3b6475"
+            "/nano_v3_reasoning_parser.py"
+        ),
     },
 }
 _DEFAULT_CLUSTER_PARAMS = CLUSTER_PARAMS["oci"]
 
 MODEL = {
     "short": "nano-agent",
-    "path": "/hf_models/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
     "server_type": "vllm",
+    # Base server args without the reasoning-parser-plugin path, which is
+    # cluster-specific and injected at runtime from CLUSTER_PARAMS.
     "server_args": (
         "--dtype auto "
         "--enable-expert-parallel "
@@ -92,8 +104,6 @@ MODEL = {
         "--mamba-ssm-cache-dtype float16 "
         "--enable-auto-tool-choice "
         "--tool-call-parser qwen3_coder "
-        "--reasoning-parser-plugin "
-        "/hf_models/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16/nano_v3_reasoning_parser.py "
         "--reasoning-parser nano_v3 "
         "--max-num-seqs 256 "
     ),
@@ -187,11 +197,17 @@ def main():
     server_nodes = cparams["server_nodes"]
     worker_gpus = cparams["worker_gpus"]
     judge_server_gpus = cparams["judge_server_gpus"]
+    model_path = cparams["model_path"]
 
     bench_keys = [b.strip() for b in args.benchmarks.split(",")]
 
-    # Append H100-only vLLM flags only when targeting an H100/H200/GB300 cluster.
-    server_args = MODEL["server_args"] + (_H100_SERVER_ARGS if args.cluster in _H100_CLUSTERS else "")
+    # Inject cluster-specific reasoning-parser-plugin path, then append
+    # H100-only vLLM flags when targeting an H100/H200/GB300 cluster.
+    server_args = (
+        MODEL["server_args"]
+        + f"--reasoning-parser-plugin {cparams['reasoning_parser_path']} "
+        + (_H100_SERVER_ARGS if args.cluster in _H100_CLUSTERS else "")
+    )
 
     # cluster_config is used to resolve benchmark input paths in multi-agent mode
     cluster_config = get_cluster_config(args.cluster)
@@ -271,7 +287,7 @@ def main():
             ctx=wrap_arguments(benchmark_args.generation_args + " " + extra_args),
             cluster=args.cluster,
             expname=name,
-            model=MODEL["path"],
+            model=model_path,
             server_type=MODEL["server_type"],
             server_gpus=server_gpus,
             server_nodes=server_nodes,
@@ -314,7 +330,7 @@ def main():
             num_chunks=bcfg["num_chunks"] if bcfg["num_chunks"] > 1 else None,
             # generation params kept for reference but unused when num_jobs=0
             generation_module="nemo_skills.inference.agent_generate",
-            model=MODEL["path"],
+            model=model_path,
             server_type=MODEL["server_type"],
             server_gpus=server_gpus,
             server_nodes=server_nodes,
