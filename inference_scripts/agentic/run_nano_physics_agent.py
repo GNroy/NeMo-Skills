@@ -48,10 +48,9 @@ OUTPUT_DIR_BASE = "/alaptev/exp/eval/nano_physics_agent"
 # Judge: on-cluster gpt-oss-120b (same as run_nano_physics_fs_official.py)
 JUDGE_MODEL = "/hf_models/gpt-oss-120b"
 JUDGE_SERVER_TYPE = "vllm"
-JUDGE_SERVER_GPUS = 8
 JUDGE_SERVER_ARGS = "--async-scheduling --max-model-len 131072"
 
-# vLLM flags that require NVIDIA compute capability ≥ 9.0 (H100/H200).
+# vLLM flags that require NVIDIA compute capability ≥ 9.0 (H100/H200/GB300).
 # OCI uses A100 (cc 8.0) — these are appended only for clusters in _H100_CLUSTERS.
 _H100_SERVER_ARGS = (
     "--kv-cache-dtype fp8 "
@@ -59,12 +58,31 @@ _H100_SERVER_ARGS = (
 )
 _H100_CLUSTERS = {"dfw", "eos", "aws-cmh"}  # GB300 also supports fp8 + flash attn
 
+# Per-cluster hardware parameters.  Each entry overrides the corresponding
+# MODEL/judge defaults for that cluster.
+CLUSTER_PARAMS = {
+    "oci": {
+        # A100 80 GB, 8 GPUs/node
+        "server_gpus": 8,
+        "server_nodes": 1,
+        "worker_gpus": 8,
+        "judge_server_gpus": 8,
+    },
+    "aws-cmh": {
+        # GB300 288 GB HBM/GPU, 4 GPUs/node — single node is sufficient for
+        # both the 30B model (nano) and the 120B judge (4 × 288 GB = 1152 GB).
+        "server_gpus": 4,
+        "server_nodes": 1,
+        "worker_gpus": 4,
+        "judge_server_gpus": 4,
+    },
+}
+_DEFAULT_CLUSTER_PARAMS = CLUSTER_PARAMS["oci"]
+
 MODEL = {
     "short": "nano-agent",
     "path": "/hf_models/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
     "server_type": "vllm",
-    "server_gpus": 8,
-    "server_nodes": 1,
     "server_args": (
         "--dtype auto "
         "--enable-expert-parallel "
@@ -151,11 +169,7 @@ def main():
         default=[],
         help="Model path(s) for worker agent(s). Enables multi-agent mode.",
     )
-    ap.add_argument("--server-gpus", type=int, default=MODEL["server_gpus"],
-                    help="GPUs for the main model server (default: 8 for OCI/A100; use 4 for aws-cmh/GB300)")
-    ap.add_argument("--server-nodes", type=int, default=MODEL["server_nodes"])
     ap.add_argument("--worker-server-type", nargs="+", default=["vllm"])
-    ap.add_argument("--worker-gpus", nargs="+", type=int, default=[8])
     ap.add_argument("--worker-names", nargs="+", default=None)
     ap.add_argument(
         "--max-tool-calls",
@@ -167,9 +181,16 @@ def main():
     )
     args = ap.parse_args()
 
+    # Resolve cluster-specific hardware parameters.
+    cparams = CLUSTER_PARAMS.get(args.cluster, _DEFAULT_CLUSTER_PARAMS)
+    server_gpus = cparams["server_gpus"]
+    server_nodes = cparams["server_nodes"]
+    worker_gpus = cparams["worker_gpus"]
+    judge_server_gpus = cparams["judge_server_gpus"]
+
     bench_keys = [b.strip() for b in args.benchmarks.split(",")]
 
-    # Append H100-only vLLM flags only when targeting an H100/H200 cluster.
+    # Append H100-only vLLM flags only when targeting an H100/H200/GB300 cluster.
     server_args = MODEL["server_args"] + (_H100_SERVER_ARGS if args.cluster in _H100_CLUSTERS else "")
 
     # cluster_config is used to resolve benchmark input paths in multi-agent mode
@@ -252,8 +273,8 @@ def main():
             expname=name,
             model=MODEL["path"],
             server_type=MODEL["server_type"],
-            server_gpus=args.server_gpus,
-            server_nodes=args.server_nodes,
+            server_gpus=server_gpus,
+            server_nodes=server_nodes,
             server_args=server_args,
             input_file=benchmark_args.input_file,
             output_dir=agent_odir,
@@ -268,7 +289,7 @@ def main():
             agent_kwargs.update(
                 worker_model=args.worker_model,
                 worker_server_type=args.worker_server_type,
-                worker_server_gpus=args.worker_gpus,
+                worker_server_gpus=[worker_gpus],
                 worker_names=args.worker_names,
                 worker_extra_args=[WORKER_EXTRA_ARGS],
                 # Workers share the orchestrator's LLM server (same model → no
@@ -295,13 +316,13 @@ def main():
             generation_module="nemo_skills.inference.agent_generate",
             model=MODEL["path"],
             server_type=MODEL["server_type"],
-            server_gpus=args.server_gpus,
-            server_nodes=args.server_nodes,
+            server_gpus=server_gpus,
+            server_nodes=server_nodes,
             server_args=server_args,
             with_sandbox=True,
             judge_model=JUDGE_MODEL,
             judge_server_type=JUDGE_SERVER_TYPE,
-            judge_server_gpus=JUDGE_SERVER_GPUS,
+            judge_server_gpus=judge_server_gpus,
             judge_server_args=JUDGE_SERVER_ARGS,
             run_after=[name],
             num_jobs=0,
