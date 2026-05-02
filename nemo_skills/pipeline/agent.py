@@ -440,6 +440,7 @@ def agent(
                         # ── Co-locate: share orchestrator server in het-group 0 ──
                         # No new server or het-group needed; workers run as
                         # lightweight HTTP processes alongside the orchestrator.
+                        # They also share the orchestrator's sandbox (same node).
                         LOG.info(
                             "Workers %s share the orchestrator server (het-group 0)",
                             [worker_names[i] for i in indices],
@@ -450,6 +451,7 @@ def agent(
                                 agent_name=worker_names[i],
                                 agent_port=worker_agent_port,
                                 extra_arguments=worker_xargs[i],
+                                sandbox=sandbox_script,
                             )
                             worker_scripts[i] = w_worker
                             worker_het_groups[i] = 0
@@ -464,6 +466,9 @@ def agent(
                         # ── Shared server: one server for all workers in this group ──
                         # Deploy exactly one LLM server for this (model, type) pair;
                         # all workers in the group reference it via shared_server_script.
+                        # If a sandbox is requested, start one in this het-group too so
+                        # workers can run code even though the orchestrator's sandbox is
+                        # on a different node (het-group 0).
                         first = indices[0]
                         w_container = cluster_config["containers"].get(w_server_type, "")
                         this_het_group = next_het_group
@@ -494,12 +499,30 @@ def agent(
                             )
                         ]
 
+                        # Dedicated sandbox for workers in this het-group (different node).
+                        worker_sandbox = None
+                        if with_sandbox:
+                            worker_sandbox = SandboxScript(
+                                cluster_config=cluster_config,
+                                keep_mounts=keep_mounts_for_sandbox,
+                                allocate_port=True,
+                                env_overrides=sandbox_env_overrides,
+                            )
+                            group_commands.append(
+                                Command(
+                                    script=worker_sandbox,
+                                    container=sandbox_container or cluster_config["containers"]["sandbox"],
+                                    name=f"{task_name}_{w_model_path.split('/')[-1]}_sandbox",
+                                )
+                            )
+
                         for i in indices:
                             w_worker = AgentWorkerScript(
                                 shared_server_script=shared_server,
                                 agent_name=worker_names[i],
                                 agent_port=worker_agent_port,
                                 extra_arguments=worker_xargs[i],
+                                sandbox=worker_sandbox,
                             )
                             worker_scripts[i] = w_worker
                             worker_het_groups[i] = this_het_group

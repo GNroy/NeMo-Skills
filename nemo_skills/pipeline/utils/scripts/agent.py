@@ -28,12 +28,15 @@ het_group=0 → SLURM_MASTER_NODE_HET_GROUP_0 (same node, localhost fallback).
 
 import logging
 from dataclasses import dataclass, field
-from typing import Dict, Optional, Tuple
+from typing import TYPE_CHECKING, Dict, Optional, Tuple
 
 from nemo_skills.pipeline.utils.scripts.base import BaseJobScript
 from nemo_skills.pipeline.utils.scripts.server import ServerScript
 from nemo_skills.pipeline.utils.server import get_free_port
 from nemo_skills.utils import get_logger_name
+
+if TYPE_CHECKING:
+    from nemo_skills.pipeline.utils.scripts.sandbox import SandboxScript
 
 LOG = logging.getLogger(get_logger_name(__file__))
 
@@ -70,6 +73,9 @@ class AgentWorkerScript(BaseJobScript):
     agent_port: Optional[int] = None
     allocate_port: bool = True
     agent_name: str = "agent_worker"
+    # When set, NEMO_SKILLS_SANDBOX_PORT is exported into the worker's container
+    # so that DirectPythonTool / PythonTool can reach the sandbox server.
+    sandbox: Optional["SandboxScript"] = None
 
     log_prefix: str = field(default="agent_worker", init=False)
 
@@ -108,7 +114,11 @@ class AgentWorkerScript(BaseJobScript):
                 f"{server_args}"
                 f"{self.extra_arguments}"
             )
-            return cmd, {}
+
+            env_vars = {}
+            if self.sandbox is not None:
+                env_vars["NEMO_SKILLS_SANDBOX_PORT"] = str(self.sandbox.port)
+            return cmd, {"environment": env_vars} if env_vars else {}
 
         self.set_inline(build_cmd)
         super().__post_init__()
