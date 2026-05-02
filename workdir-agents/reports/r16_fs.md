@@ -10,9 +10,9 @@
 | Model | `nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16` orchestrator + worker; `/hf_models/gpt-oss-120b` second worker |
 | Cluster | aws-cmh (GB300, 4 GPUs/node, no fp8, FLASH_ATTN backend) |
 | Key config changes | Same as r14 + **sandbox fix**: nano worker shares orch sandbox; gpt worker gets dedicated sandbox in het-group 1 |
-| Commit | TBD |
-| SLURM generation jobs | TBD |
-| SLURM eval jobs | TBD |
+| Commit | `16ef2ee8 fix: propagate NEMO_SKILLS_SANDBOX_PORT to worker containers in multi-agent jobs` |
+| SLURM generation jobs | 94002, 94004, 94006, 94008, 94010 (rs0–rs4, het-jobs +0/+1) |
+| SLURM eval jobs | 94012–94017 (judge 94012–94016, summarize 94017) |
 
 ## Motivation
 

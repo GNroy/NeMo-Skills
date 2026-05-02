@@ -10,9 +10,9 @@
 | Model | `nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16` (HF cache, aws-cmh) |
 | Cluster | aws-cmh (GB300, 4 GPUs/node, no fp8, FLASH_ATTN backend) |
 | Key config changes | Same as r13 + **sandbox port fix** (`NEMO_SKILLS_SANDBOX_PORT` propagated to co-located workers) |
-| Commit | TBD |
-| SLURM generation jobs | TBD |
-| SLURM eval jobs | TBD |
+| Commit | `16ef2ee8 fix: propagate NEMO_SKILLS_SANDBOX_PORT to worker containers in multi-agent jobs` |
+| SLURM generation jobs | 93991–93995 (rs0–rs4) |
+| SLURM eval jobs | 93996–94001 (judge 93996–94000, summarize 94001) |
 
 ## Motivation
 
