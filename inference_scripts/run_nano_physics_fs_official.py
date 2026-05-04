@@ -119,10 +119,12 @@ MODEL = {
     "server_type": "vllm",
     # Base server args — cluster-specific reasoning-parser-plugin path and
     # optional fp8 flag are injected at runtime from CLUSTER_PARAMS.
+    # Note: --attention-backend FLASH_ATTN is NOT included here because
+    # FLASH_ATTN does not support fp8 kv-cache in vLLM 0.18.x.  vLLM
+    # auto-selects FlashInfer on GB300 when fp8 is enabled.
     "server_args_base": (
         "--dtype auto "
         "--enable-expert-parallel "
-        "--attention-backend FLASH_ATTN "
         "--trust-remote-code "
         "--gpu-memory-utilization 0.9 "
         "--enable-chunked-prefill "

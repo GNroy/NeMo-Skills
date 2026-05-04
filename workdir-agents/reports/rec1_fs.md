@@ -7,7 +7,7 @@
 | Run ID | rec1 |
 | Benchmark | frontierscience-olympiad (fs) |
 | Script | `inference_scripts/run_nano_physics_fs_official.py` |
-| Cluster | aws-cmh (GB300, 4 GPUs/node, fp8, FLASH_ATTN) |
+| Cluster | aws-cmh (GB300, 4 GPUs/node, fp8, auto attention backend) |
 | Model | `nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16` (HF cache) |
 | Commit | `4b5a3188 feat: add aws-cmh cluster support to run_nano_physics_fs_official.py` |
 
