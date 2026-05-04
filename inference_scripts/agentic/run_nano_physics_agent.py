@@ -151,15 +151,16 @@ PYTHON_TOOL = '++tool_modules=["nemo_skills.mcp.servers.python_tool::PythonTool"
 ORCHESTRATOR_TOOL = '++tool_modules=["nemo_skills.mcp.servers.agent_tool::CallAgentTool"] '
 
 # Nano worker: DirectPythonTool + code-execution system prompt + thinking enabled.
-# tokens_to_generate is capped to prevent per-call queue time from exceeding
-# the orchestrator's HTTP timeout when many concurrent problems fire simultaneously.
-# Thinking is re-enabled: within the 32k budget it helps code quality without
-# exhausting the generation limit (the issue in r6–r11 was the *orchestrator*
-# thinking, not the worker).
+# tokens_to_generate must be large enough for the full thinking+answer sequence.
+# 32768 was too small: hard frontier-science problems exhaust the budget entirely
+# inside the <think> block (finish_reason=length), leaving choice.message.content
+# empty → generation="" returned to orchestrator → r15/r16 bug.  Use 131072 to
+# match the orchestrator budget; the CallAgentTool timeout (1200 s) is generous
+# enough for GB300 throughput on this 3B-active MoE model.
 NANO_WORKER_EXTRA_ARGS = (
     '++tool_modules=["nemo_skills.mcp.servers.python_tool::DirectPythonTool"] '
     '++system_message_yaml=agents/code_agent '
-    '++inference.tokens_to_generate=32768 '
+    '++inference.tokens_to_generate=131072 '
     '++max_tool_output_tokens=2000 '
     '++chat_template_kwargs.enable_thinking=True '
 )
