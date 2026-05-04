@@ -10,9 +10,9 @@
 | Model | `nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16` orchestrator + worker; `/hf_models/gpt-oss-120b` second worker |
 | Cluster | aws-cmh (GB300, 4 GPUs/node, no fp8, FLASH_ATTN backend) |
 | Key config changes | Same as r16 + **worker token budget fix**: `tokens_to_generate=131072` for nano worker (was 32768) |
-| Commit | TBD |
-| SLURM generation jobs | TBD |
-| SLURM eval jobs | TBD |
+| Commit | `d130c7f6 fix: raise nano worker token budget to 131072; add r15-r18 reports` |
+| SLURM generation jobs | 124728, 124730, 124734, 124732, 124736 (rs0–rs4, het-jobs +0/+1) |
+| SLURM eval jobs | 124738–124743 (judge 124738–124742, summarize 124743) |
 
 ## Motivation
 
