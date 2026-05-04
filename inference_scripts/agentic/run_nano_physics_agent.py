@@ -372,7 +372,13 @@ def main():
                 worker_gpus_list.append(judge_server_gpus)
                 if worker_names is not None:
                     worker_names.append(args.gpt_worker_name)
+                elif args.worker_model:
+                    # Auto-generate names for nano workers so the gpt worker
+                    # name can be appended without creating a mismatched list.
+                    worker_names = [f"nano_solver_{i}" for i in range(len(args.worker_model))]
+                    worker_names.append(args.gpt_worker_name)
                 else:
+                    # gpt-only: single worker, just use the gpt name
                     worker_names = [args.gpt_worker_name]
 
             agent_kwargs.update(
