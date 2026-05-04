@@ -34,7 +34,7 @@ Primary question: does the two-worker setup (nano + gpt) improve accuracy over s
 | r5  | single-agent, OCI A100 | 41.00% ± 3.16% | 40.10% | 63.00% | 50,296 | 1,891 |
 | r12 | single-agent, GB300 (no fp8) | 37.00% ± 2.12% | 33.00% | 59.00% | 56,174 | 1,000 |
 | r16 | nano + gpt workers, GB300 (nano token budget bug) | 24.40% ± 3.71% | 20.20% | 56.00% | 7,548 | 2,694 |
-| r17 | nano worker, GB300 (no fp8, FLASH_ATTN, token budget fix) | *pending* | *pending* | *pending* | *pending* | *pending* |
+| r17 | nano worker, GB300 (no fp8, FLASH_ATTN, token budget fix) | 15.60% ± 5.37% | 8.40% | 42.00% | 6,465 | 13,364 |
 | r18 | nano + gpt workers, GB300 (no fp8, FLASH_ATTN, token budget fix) | **20.60% ± 2.88%** | **15.60%** | **52.00%** | **8,236** | **7,562** |
 
 ### Subject breakdown
