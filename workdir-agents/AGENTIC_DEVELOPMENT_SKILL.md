@@ -165,6 +165,62 @@ ssh -i /home/alaptev/.ssh/clusters/oci/id_ecdsa \
 
 ## 3. Analyzing results
 
+### Checking run progress
+
+Use `inference_scripts/check_run_progress.py` for a quick status snapshot of any
+running or recently completed eval run.  It connects to the cluster via SSH, checks
+file sentinels, and reports stage, per-seed progress, generation speed, and ETA.
+
+```bash
+source ~/miniconda3/bin/activate
+
+# aws-cmh cluster, frontierscience-olympiad (defaults)
+python inference_scripts/check_run_progress.py r17 r18
+python inference_scripts/check_run_progress.py r17 r18 rec2:no-tool rec2:python
+
+# different cluster or benchmark
+python inference_scripts/check_run_progress.py --cluster oci --bench physics r9 r10
+python inference_scripts/check_run_progress.py --bench hle-physics r19
+```
+
+**Supported clusters** (`--cluster`): `aws-cmh` (default), `oci`
+
+**Supported benchmarks** (`--bench`): `fs` (frontierscience-olympiad, default),
+`physics`, `hle-physics`
+
+**Run ID formats:**
+
+| Format | Type | Resolves to |
+|--------|------|-------------|
+| `r17` | agentic | `nano_physics_agent/agent_{bench}-nano-agent-r17` |
+| `rec2:no-tool` | non-agentic | `run_nano_physics_fs_official/eval_{bench}-nano-rec-no-tool-r2` |
+| `rec2:python` | non-agentic | `run_nano_physics_fs_official/eval_{bench}-nano-rec-python-r2` |
+
+**Stages reported:**
+
+| Stage | Meaning |
+|-------|---------|
+| `GENERATION` | Seeds still producing output JSONL; shows per-seed line count and speed/ETA |
+| `JUDGE` | All `.jsonl.done` sentinels present; judge jobs running |
+| `DONE` | Summarize log found — full pipeline complete |
+
+Example output:
+```
+──────────────────────────────────────────────────────
+  r17   [GENERATION]
+──────────────────────────────────────────────────────
+  Seeds done : 2/5
+    ✓ output-rs0    100/100
+    ✓ output-rs1    100/100
+    … output-rs2     63/100   last upd 1.2m ago
+    … output-rs3     58/100   last upd 0.8m ago
+    … output-rs4     41/100   last upd 2.1m ago
+
+  Speed  : 847s/prob  (min 312s  max 2104s)
+  Remain : 238 problems
+  ETA    : ~40m
+```
+
 ### Summary accuracy table
 
 ```bash
