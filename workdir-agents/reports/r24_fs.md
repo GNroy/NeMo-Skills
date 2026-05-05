@@ -10,9 +10,9 @@
 | Model | `nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16` orchestrator + nano worker; `/hf_models/gpt-oss-120b` gpt worker |
 | Cluster | aws-cmh (GB300, 4 GPUs/node, fp8, FlashInfer backend) |
 | Key config changes | Re-enable `collect_results` via `expose_collect_results=true`; keep `expose_blocking_calls=False` |
-| Commit | `<pending>` |
-| SLURM generation jobs | TBD |
-| SLURM eval jobs | TBD |
+| Commit | `a2072279 fix: re-enable collect_results for orchestrator; r23 results + r24 stub` |
+| SLURM generation jobs | 134891, 134893, 134895, 134897, 134899 (rs0–rs4, het-jobs +0/+1) |
+| SLURM eval jobs | 134910–134914 (judge rs0–rs4), 134915 (summarize) |
 
 ## Motivation
 
