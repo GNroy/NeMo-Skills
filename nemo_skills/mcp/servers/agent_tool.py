@@ -106,6 +106,10 @@ class CallAgentTool(Tool):
             # tokens (tail kept).  Prevents long worker outputs from blowing
             # up the orchestrator's context window.
             "max_injection_tokens": -1,
+            # Whether to expose collect_results as a tool to the LLM.
+            # False (default): results arrive only via auto-injection; the LLM
+            # cannot poll explicitly.  True: restore the explicit polling tool.
+            "expose_collect_results": False,
         }
         # Resolved at configure() time: {name: url}
         self._agent_urls: Dict[str, str] = {}
@@ -219,8 +223,10 @@ class CallAgentTool(Tool):
                 }
             )
 
-        # collect_results is only meaningful if there are agents to call
-        if self._agent_urls:
+        # collect_results is only meaningful if there are agents to call,
+        # and only exposed when explicitly enabled (default: False so the LLM
+        # cannot poll and must rely on auto-injection).
+        if self._agent_urls and self._config.get("expose_collect_results", False):
             tools.append(
                 {
                     "name": "collect_results",
