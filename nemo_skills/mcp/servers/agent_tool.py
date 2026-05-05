@@ -110,6 +110,13 @@ class CallAgentTool(Tool):
             # False (default): results arrive only via auto-injection; the LLM
             # cannot poll explicitly.  True: restore the explicit polling tool.
             "expose_collect_results": False,
+            # Whether to expose blocking call_{name} variants to the LLM.
+            # False (default): only async variants are shown; blocking calls are
+            # available internally but the LLM cannot select them.  Keeping
+            # blocking tools hidden prevents the model from making long-running
+            # synchronous calls and eliminates the "4-tool confusion" where the
+            # model mixes blocking and async variants in the same session.
+            "expose_blocking_calls": False,
         }
         # Resolved at configure() time: {name: url}
         self._agent_urls: Dict[str, str] = {}
@@ -173,39 +180,42 @@ class CallAgentTool(Tool):
 
     async def list_tools(self) -> List[Dict[str, Any]]:
         tools = []
+        expose_blocking = self._config.get("expose_blocking_calls", False)
         for agent_name in self._agent_urls:
-            # Blocking variant
-            tools.append(
-                {
-                    "name": f"call_{agent_name}",
-                    "description": (
-                        f"Delegate a task to the '{agent_name}' specialist agent and wait for the result. "
-                        f"Use when you need the result before proceeding."
-                    ),
-                    "input_schema": {
-                        "type": "object",
-                        "properties": {
-                            "task": {
-                                "type": "string",
-                                "description": (
-                                    "The complete task description for the agent. "
-                                    "Be specific — include all context the agent needs."
-                                ),
-                            }
+            if expose_blocking:
+                # Blocking variant — only exposed when explicitly enabled
+                tools.append(
+                    {
+                        "name": f"call_{agent_name}",
+                        "description": (
+                            f"Delegate a task to the '{agent_name}' specialist agent and wait for the result. "
+                            f"Use when you need the result before proceeding."
+                        ),
+                        "input_schema": {
+                            "type": "object",
+                            "properties": {
+                                "task": {
+                                    "type": "string",
+                                    "description": (
+                                        "The complete task description for the agent. "
+                                        "Be specific — include all context the agent needs."
+                                    ),
+                                }
+                            },
+                            "required": ["task"],
                         },
-                        "required": ["task"],
-                    },
-                }
-            )
+                    }
+                )
             # Non-blocking (async) variant
             tools.append(
                 {
                     "name": f"call_{agent_name}_async",
                     "description": (
-                        f"Delegate a task to the '{agent_name}' specialist agent without blocking. "
-                        f"Returns a ticket_id immediately; the result will be automatically injected "
-                        f"into this conversation when the agent finishes. "
-                        f"Use for independent sub-tasks that can run while you continue reasoning."
+                        f"Delegate the COMPLETE problem to the '{agent_name}' specialist agent. "
+                        f"Call this tool EXACTLY ONCE — pass the full, original problem statement "
+                        f"and let the agent handle the entire solution. "
+                        f"The result is automatically injected into your conversation when ready; "
+                        f"no further action is needed to retrieve it."
                     ),
                     "input_schema": {
                         "type": "object",
