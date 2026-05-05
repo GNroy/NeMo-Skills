@@ -228,6 +228,20 @@ def main():
         help="Override vLLM attention backend for the nano server "
              "(e.g. FLASH_ATTN, FLASHINFER). Default: let vLLM auto-select.",
     )
+    ap.add_argument(
+        "--temperature",
+        type=float,
+        default=None,
+        help="Override sampling temperature for orchestrator and all workers. "
+             "Default: 0.6 (tool-calling preset from NVIDIA model card).",
+    )
+    ap.add_argument(
+        "--top-p",
+        type=float,
+        default=None,
+        help="Override top_p for orchestrator and all workers. "
+             "Default: 0.95 (tool-calling preset from NVIDIA model card).",
+    )
     args = ap.parse_args()
 
     # Resolve cluster-specific hardware parameters.
@@ -271,9 +285,17 @@ def main():
         print(f"  workers:    {all_workers or '(none — single agent)'}")
         print(f"{'=' * 60}")
 
-        base_args = MODEL["sampling_args"] + MODEL["inference_args"] + f"++max_tool_calls={args.max_tool_calls} "
+        sampling_args = MODEL["sampling_args"]
+        sampling_override = ""
+        if args.temperature is not None or args.top_p is not None:
+            t = args.temperature if args.temperature is not None else 0.6
+            p = args.top_p if args.top_p is not None else 0.95
+            sampling_override = f"++inference.temperature={t} ++inference.top_p={p} "
+        base_args = sampling_args + sampling_override + MODEL["inference_args"] + f"++max_tool_calls={args.max_tool_calls} "
 
         have_workers = bool(args.worker_model) or args.gpt_worker
+        nano_worker_args = NANO_WORKER_EXTRA_ARGS + sampling_override
+        gpt_worker_args  = GPT_WORKER_EXTRA_ARGS  + sampling_override
         if have_workers:
             # Multi-agent: orchestrator delegates via CallAgentTool with orchestrator
             # system prompt; workers handle computation with PythonTool.
@@ -304,8 +326,8 @@ def main():
             if have_workers:
                 for i, (wm, wargs) in enumerate(zip(
                     list(args.worker_model) + ([JUDGE_MODEL] if args.gpt_worker else []),
-                    [NANO_WORKER_EXTRA_ARGS] * len(args.worker_model)
-                    + ([GPT_WORKER_EXTRA_ARGS] if args.gpt_worker else []),
+                    [nano_worker_args] * len(args.worker_model)
+                    + ([gpt_worker_args] if args.gpt_worker else []),
                 )):
                     print(f"  [DRY] worker {i} ({wm}) args:")
                     for token in wargs.strip().split():
@@ -358,7 +380,7 @@ def main():
             # No manual reuse flag needed.
             worker_models = list(args.worker_model)
             worker_types = list(args.worker_server_type)
-            worker_xargs = [NANO_WORKER_EXTRA_ARGS] * len(worker_models)
+            worker_xargs = [nano_worker_args] * len(worker_models)
             # Nano worker: same server args as orchestrator (triggers co-location).
             worker_sargs = [server_args] * len(worker_models)
             worker_gpus_list = [worker_gpus] * len(worker_models)
@@ -367,7 +389,7 @@ def main():
             if args.gpt_worker:
                 worker_models.append(JUDGE_MODEL)
                 worker_types.append(JUDGE_SERVER_TYPE)
-                worker_xargs.append(GPT_WORKER_EXTRA_ARGS)
+                worker_xargs.append(gpt_worker_args)
                 worker_sargs.append(GPT_WORKER_SERVER_ARGS)
                 worker_gpus_list.append(judge_server_gpus)
                 if worker_names is not None:
