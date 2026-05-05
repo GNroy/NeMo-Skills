@@ -127,4 +127,4 @@ Additionally, update the async tool description from "Use for independent sub-ta
 
 Expected effect: orchestrator sees exactly 2 tools (call_nano_solver_0_async, call_gpt_solver_async), with descriptions that discourage multiple calls. Combined with the existing system prompt ("exactly N tool calls"), tool calls should settle at 2 per session.
 
-Commit: `<pending r23 commit>`
+Commit: `70844588 fix: hide blocking call_{name} variants from tool list; r21/r22 results + r23 stub`

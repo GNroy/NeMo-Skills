@@ -10,9 +10,9 @@
 | Model | `nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16` orchestrator + nano worker; `/hf_models/gpt-oss-120b` gpt worker |
 | Cluster | aws-cmh (GB300, 4 GPUs/node, fp8, FlashInfer backend) |
 | Key config changes | Hide blocking call_{name} variants from tool list; update async tool description to "EXACTLY ONCE, complete problem" |
-| Commit | `<pending>` |
-| SLURM generation jobs | TBD |
-| SLURM eval jobs | TBD |
+| Commit | `70844588 fix: hide blocking call_{name} variants from tool list; r21/r22 results + r23 stub` |
+| SLURM generation jobs | 134541, 134543, 134545, 134547, 134549 (rs0–rs4, het-jobs +0/+1) |
+| SLURM eval jobs | 134551–134555 (judge rs0–rs4), 134556 (summarize) |
 
 ## Motivation
 
