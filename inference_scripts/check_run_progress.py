@@ -209,9 +209,12 @@ def build_snippet(output_dir: str, benchmark: str, problems_per_seed: int) -> st
 
 
 def ssh_run(snippet: str, cluster_cfg: dict) -> str:
+    # Pipe snippet via stdin to avoid shell-quoting issues with repr() output
+    # (repr uses single-quote delimiters and escapes inner single quotes as \'
+    # which bash cannot parse inside single-quoted strings).
     result = subprocess.run(
-        ["ssh", "-i", cluster_cfg["ssh_key"], cluster_cfg["ssh_host"],
-         f"python3 -c {snippet!r}"],
+        ["ssh", "-i", cluster_cfg["ssh_key"], cluster_cfg["ssh_host"], "python3 -"],
+        input=snippet,
         capture_output=True,
         text=True,
         timeout=30,
