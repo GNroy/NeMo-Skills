@@ -314,6 +314,11 @@ def main():
                 # at any time, each waiting for a 32k-token worker call to free a slot.
                 + "++tool_overrides.CallAgentTool.timeout_s=1200 "
                 + "++tool_overrides.CallAgentTool.max_injection_tokens=4000 "
+                # Re-enable collect_results: gives the model an explicit "stop delegating,
+                # collect all results now" operation.  Without it the model has no completion
+                # signal and retries workers in sub-task loops until max_tool_calls is hit.
+                # Blocking call_{name} variants remain hidden (expose_blocking_calls=False).
+                + "++tool_overrides.CallAgentTool.expose_collect_results=true "
             )
         else:
             # Single-agent: one agent handles everything with PythonTool.
