@@ -10,9 +10,9 @@
 | Model | `nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16` orchestrator + nano worker; `/hf_models/gpt-oss-120b` gpt worker |
 | Cluster | aws-cmh (GB300, 4 GPUs/node, **fp8, FlashInfer backend**) |
 | Key config changes | fp8 + FlashInfer (matching rec1); `collect_results` hidden from tool list (auto-injection only) |
-| Commit | TBD |
-| SLURM generation jobs | TBD |
-| SLURM eval jobs | TBD |
+| Commit | `03fd8b37 fix: hide collect_results from LLM tool list by default; r20 results + r21 stub` |
+| SLURM generation jobs | 133475, 133469, 133471, 133473, 133477 (rs0–rs4, het-jobs +0/+1) |
+| SLURM eval jobs | 133479–133483 (judge rs0–rs4), 133484 (summarize) |
 
 ## Motivation
 
