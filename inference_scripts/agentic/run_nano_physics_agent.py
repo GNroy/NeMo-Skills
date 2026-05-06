@@ -251,6 +251,15 @@ def main():
         help="Override top_p for orchestrator and all workers. "
              "Default: 0.95 (tool-calling preset from NVIDIA model card).",
     )
+    ap.add_argument(
+        "--max-concurrent-requests",
+        type=int,
+        default=512,
+        help="Total concurrent-request budget shared across all agents on the same "
+             "vLLM server (het-group 0). Automatically divided equally among the "
+             "orchestrator and any co-located workers (same model path). Workers on "
+             "separate nodes keep their own defaults.",
+    )
     args = ap.parse_args()
 
     # Resolve cluster-specific hardware parameters.
@@ -305,6 +314,54 @@ def main():
         have_workers = bool(args.worker_model) or args.gpt_worker
         nano_worker_args = NANO_WORKER_EXTRA_ARGS + sampling_override
         gpt_worker_args  = GPT_WORKER_EXTRA_ARGS  + sampling_override
+
+        # Build worker lists up front (needed for auto-concurrency and dry-run).
+        worker_models = []
+        worker_types = []
+        worker_xargs = []
+        worker_sargs = []
+        worker_gpus_list = []
+        worker_names = None
+        if have_workers:
+            # agent() auto-deduplicates LLM servers: workers whose model matches
+            # the orchestrator are co-located (het-group 0); workers with a
+            # different model get their own server in a separate het-group.
+            worker_models = list(args.worker_model)
+            worker_types = list(args.worker_server_type)
+            worker_xargs = [nano_worker_args] * len(worker_models)
+            worker_sargs = [server_args] * len(worker_models)
+            worker_gpus_list = [worker_gpus] * len(worker_models)
+            worker_names = list(args.worker_names) if args.worker_names else None
+
+            if args.gpt_worker:
+                worker_models.append(JUDGE_MODEL)
+                worker_types.append(JUDGE_SERVER_TYPE)
+                worker_xargs.append(gpt_worker_args)
+                worker_sargs.append(GPT_WORKER_SERVER_ARGS)
+                worker_gpus_list.append(judge_server_gpus)
+                if worker_names is not None:
+                    worker_names.append(args.gpt_worker_name)
+                elif args.worker_model:
+                    worker_names = [f"nano_solver_{i}" for i in range(len(args.worker_model))]
+                    worker_names.append(args.gpt_worker_name)
+                else:
+                    worker_names = [args.gpt_worker_name]
+
+            # Auto-concurrency: divide the shared vLLM server's request budget
+            # equally among all agents on het-group 0 (orchestrator + co-located
+            # workers, identified by matching model path).  Workers on separate
+            # nodes keep their own defaults.  Adding more co-located workers
+            # automatically reduces each agent's share without manual tuning.
+            num_collocated = 1 + sum(1 for m in worker_models if m == model_path)
+            per_agent = args.max_concurrent_requests // num_collocated
+            collocated_concurrency = (
+                f"++max_concurrent_requests={per_agent} "
+            )
+            worker_xargs = [
+                (xargs + f"++max_concurrent_tasks={per_agent} " if m == model_path else xargs)
+                for m, xargs in zip(worker_models, worker_xargs)
+            ]
+
         if have_workers:
             # Multi-agent: orchestrator delegates via CallAgentTool with orchestrator
             # system prompt; workers handle computation with PythonTool.
@@ -318,9 +375,7 @@ def main():
                 + "++system_message_yaml=agents/orchestrator "
                 + "++inference.extra_body.tool_choice=required "
                 + ("" if args.orchestrator_thinking else "++chat_template_kwargs.enable_thinking=False ")
-                # Allow up to 20 min per worker call: 100 concurrent problems all fire
-                # call_solver_async at once; worker semaphore=64 means up to 36 queue
-                # at any time, each waiting for a 32k-token worker call to free a slot.
+                + collocated_concurrency
                 + "++tool_overrides.CallAgentTool.timeout_s=1200 "
                 + "++tool_overrides.CallAgentTool.max_injection_tokens=4000 "
                 # Re-enable collect_results: gives the model an explicit "stop delegating,
@@ -337,15 +392,10 @@ def main():
             print("  [DRY] orchestrator args:")
             for token in extra_args.strip().split():
                 print(f"    {token}")
-            if have_workers:
-                for i, (wm, wargs) in enumerate(zip(
-                    list(args.worker_model) + ([JUDGE_MODEL] if args.gpt_worker else []),
-                    [nano_worker_args] * len(args.worker_model)
-                    + ([gpt_worker_args] if args.gpt_worker else []),
-                )):
-                    print(f"  [DRY] worker {i} ({wm}) args:")
-                    for token in wargs.strip().split():
-                        print(f"    {token}")
+            for i, (wm, wargs) in enumerate(zip(worker_models, worker_xargs)):
+                print(f"  [DRY] worker {i} ({wm}) args:")
+                for token in wargs.strip().split():
+                    print(f"    {token}")
             results.append((name, odir))
             continue
 
@@ -388,35 +438,6 @@ def main():
         )
 
         if have_workers:
-            # Build per-worker lists.  agent() auto-deduplicates LLM servers:
-            # workers whose model matches the orchestrator are co-located (het-group 0);
-            # workers sharing a non-orchestrator model share one server in one het-group.
-            # No manual reuse flag needed.
-            worker_models = list(args.worker_model)
-            worker_types = list(args.worker_server_type)
-            worker_xargs = [nano_worker_args] * len(worker_models)
-            # Nano worker: same server args as orchestrator (triggers co-location).
-            worker_sargs = [server_args] * len(worker_models)
-            worker_gpus_list = [worker_gpus] * len(worker_models)
-            worker_names = list(args.worker_names) if args.worker_names else None
-
-            if args.gpt_worker:
-                worker_models.append(JUDGE_MODEL)
-                worker_types.append(JUDGE_SERVER_TYPE)
-                worker_xargs.append(gpt_worker_args)
-                worker_sargs.append(GPT_WORKER_SERVER_ARGS)
-                worker_gpus_list.append(judge_server_gpus)
-                if worker_names is not None:
-                    worker_names.append(args.gpt_worker_name)
-                elif args.worker_model:
-                    # Auto-generate names for nano workers so the gpt worker
-                    # name can be appended without creating a mismatched list.
-                    worker_names = [f"nano_solver_{i}" for i in range(len(args.worker_model))]
-                    worker_names.append(args.gpt_worker_name)
-                else:
-                    # gpt-only: single worker, just use the gpt name
-                    worker_names = [args.gpt_worker_name]
-
             agent_kwargs.update(
                 worker_model=worker_models,
                 worker_server_type=worker_types,
