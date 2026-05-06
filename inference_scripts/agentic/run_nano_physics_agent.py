@@ -260,6 +260,14 @@ def main():
              "orchestrator and any co-located workers (same model path). Workers on "
              "separate nodes keep their own defaults.",
     )
+    ap.add_argument(
+        "--worker-timeout",
+        type=int,
+        default=1200,
+        help="Seconds before a worker call is considered timed out (timeout_s for "
+             "CallAgentTool). Default 1200s (20 min). Increase if nano worker needs "
+             "longer to solve hard problems under high concurrency.",
+    )
     args = ap.parse_args()
 
     # Resolve cluster-specific hardware parameters.
@@ -376,7 +384,7 @@ def main():
                 + "++inference.extra_body.tool_choice=required "
                 + ("" if args.orchestrator_thinking else "++chat_template_kwargs.enable_thinking=False ")
                 + collocated_concurrency
-                + "++tool_overrides.CallAgentTool.timeout_s=1200 "
+                + f"++tool_overrides.CallAgentTool.timeout_s={args.worker_timeout} "
                 + "++tool_overrides.CallAgentTool.max_injection_tokens=4000 "
                 # Re-enable collect_results: gives the model an explicit "stop delegating,
                 # collect all results now" operation.  Without it the model has no completion
