@@ -229,6 +229,15 @@ def main():
              "(e.g. FLASH_ATTN, FLASHINFER). Default: let vLLM auto-select.",
     )
     ap.add_argument(
+        "--orchestrator-thinking",
+        action="store_true",
+        help="Enable chain-of-thought thinking for the orchestrator. "
+             "Default: disabled (thinking=False) to prevent the orchestrator "
+             "from exhausting its token budget in the <think> block before "
+             "emitting tool calls. Enable to test if orchestrator reasoning "
+             "improves synthesis quality.",
+    )
+    ap.add_argument(
         "--temperature",
         type=float,
         default=None,
@@ -308,7 +317,7 @@ def main():
                 + ORCHESTRATOR_TOOL
                 + "++system_message_yaml=agents/orchestrator "
                 + "++inference.extra_body.tool_choice=required "
-                + "++chat_template_kwargs.enable_thinking=False "
+                + ("" if args.orchestrator_thinking else "++chat_template_kwargs.enable_thinking=False ")
                 # Allow up to 20 min per worker call: 100 concurrent problems all fire
                 # call_solver_async at once; worker semaphore=64 means up to 36 queue
                 # at any time, each waiting for a 32k-token worker call to free a slot.
