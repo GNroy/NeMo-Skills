@@ -173,8 +173,16 @@ GPT_WORKER_EXTRA_ARGS = (
     '++max_tool_output_tokens=2000 '
 )
 
-# vLLM server args for the gpt-oss-120b worker (same model as judge).
-GPT_WORKER_SERVER_ARGS = JUDGE_SERVER_ARGS
+# vLLM server args for the gpt-oss-120b worker.
+# Adds --reasoning-parser openai_gptoss so gpt-oss reasoning tokens are separated
+# from the final code output (cleaner DirectPythonTool extraction).
+# No --tool-call-parser needed: the worker uses DirectPythonTool (text-based),
+# not vLLM structured tool calls.
+GPT_WORKER_SERVER_ARGS = (
+    "--async-scheduling "
+    "--max-model-len 131072 "
+    "--reasoning-parser openai_gptoss "
+)
 
 # When --gpt-orchestrator is set, these override the Nano MODEL defaults.
 # Tool calling requires --tool-call-parser openai and --reasoning-parser openai_gptoss;
