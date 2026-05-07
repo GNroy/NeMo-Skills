@@ -176,6 +176,18 @@ GPT_WORKER_EXTRA_ARGS = (
 # vLLM server args for the gpt-oss-120b worker (same model as judge).
 GPT_WORKER_SERVER_ARGS = JUDGE_SERVER_ARGS
 
+# When --gpt-orchestrator is set, these override the Nano MODEL defaults.
+GPT_ORCHESTRATOR_MODEL = {
+    "short": "gpt-agent",
+    "server_type": "vllm",
+    "server_args": JUDGE_SERVER_ARGS + " ",
+    "sampling_args": "++inference.temperature=0.6 ++inference.top_p=0.95 ",
+    "inference_args": (
+        "++inference.tokens_to_generate=32768 "
+        "++parse_reasoning=False "
+    ),
+}
+
 
 def main():
     ap = argparse.ArgumentParser(
@@ -227,6 +239,13 @@ def main():
         default=None,
         help="Override vLLM attention backend for the nano server "
              "(e.g. FLASH_ATTN, FLASHINFER). Default: let vLLM auto-select.",
+    )
+    ap.add_argument(
+        "--gpt-orchestrator",
+        action="store_true",
+        help="Use gpt-oss-120b as the orchestrator instead of Nano. "
+             "The GPT model does not support thinking; --orchestrator-thinking "
+             "is ignored when this flag is set.",
     )
     ap.add_argument(
         "--orchestrator-thinking",
@@ -287,19 +306,31 @@ def main():
     judge_server_gpus = cparams["judge_server_gpus"]
     model_path = cparams["model_path"]
 
+    # --gpt-orchestrator: swap in GPT-120B as orchestrator.
+    # Uses judge_server_gpus (same hardware) and GPT's server/inference args.
+    # --orchestrator-thinking is silently ignored (GPT has no thinking mode).
+    orch_model = MODEL
+    if args.gpt_orchestrator:
+        orch_model = GPT_ORCHESTRATOR_MODEL
+        model_path = JUDGE_MODEL
+        server_gpus = judge_server_gpus
+
     bench_keys = [b.strip() for b in args.benchmarks.split(",")]
 
-    # Inject cluster-specific reasoning-parser-plugin path, then append
-    # H100-only vLLM flags when targeting an H100/H200/GB300 cluster.
+    # Inject cluster-specific reasoning-parser-plugin path (Nano only), then
+    # append H100-only vLLM flags when targeting an H100/H200/GB300 cluster.
     # --no-fp8 suppresses fp8 kv-cache for ablation runs.
     h100_args = "" if args.no_fp8 else (_H100_SERVER_ARGS if args.cluster in _H100_CLUSTERS else "")
     attn_args = f"--attention-backend {args.attention_backend} " if args.attention_backend else ""
-    server_args = (
-        MODEL["server_args"]
-        + f"--reasoning-parser-plugin {cparams['reasoning_parser_path']} "
-        + h100_args
-        + attn_args
-    )
+    if args.gpt_orchestrator:
+        server_args = orch_model["server_args"] + h100_args + attn_args
+    else:
+        server_args = (
+            orch_model["server_args"]
+            + f"--reasoning-parser-plugin {cparams['reasoning_parser_path']} "
+            + h100_args
+            + attn_args
+        )
 
     # cluster_config is used to resolve benchmark input paths in multi-agent mode
     cluster_config = get_cluster_config(args.cluster)
@@ -308,8 +339,8 @@ def main():
     for bkey in bench_keys:
         bcfg = BENCHMARKS[bkey]
 
-        name = f"agent_{bkey}-{MODEL['short']}-r{args.run_id}"
-        odir = f"{args.output_dir}/agent_{bkey}-{MODEL['short']}-r{args.run_id}"
+        name = f"agent_{bkey}-{orch_model['short']}-r{args.run_id}"
+        odir = f"{args.output_dir}/agent_{bkey}-{orch_model['short']}-r{args.run_id}"
 
         print(f"\n{'=' * 60}")
         print(f"  {name}")
@@ -320,13 +351,13 @@ def main():
         print(f"  workers:    {all_workers or '(none — single agent)'}")
         print(f"{'=' * 60}")
 
-        sampling_args = MODEL["sampling_args"]
+        sampling_args = orch_model["sampling_args"]
         sampling_override = ""
         if args.temperature is not None or args.top_p is not None:
             t = args.temperature if args.temperature is not None else 0.6
             p = args.top_p if args.top_p is not None else 0.95
             sampling_override = f"++inference.temperature={t} ++inference.top_p={p} "
-        base_args = sampling_args + sampling_override + MODEL["inference_args"] + f"++max_tool_calls={args.max_tool_calls} "
+        base_args = sampling_args + sampling_override + orch_model["inference_args"] + f"++max_tool_calls={args.max_tool_calls} "
 
         have_workers = bool(args.worker_model) or args.gpt_worker
         nano_worker_args = NANO_WORKER_EXTRA_ARGS + sampling_override
@@ -391,7 +422,7 @@ def main():
                 + ORCHESTRATOR_TOOL
                 + "++system_message_yaml=agents/orchestrator "
                 + "++inference.extra_body.tool_choice=required "
-                + ("" if args.orchestrator_thinking else "++chat_template_kwargs.enable_thinking=False ")
+                + ("" if (args.orchestrator_thinking or args.gpt_orchestrator) else "++chat_template_kwargs.enable_thinking=False ")
                 + collocated_concurrency
                 + f"++tool_overrides.CallAgentTool.timeout_s={args.worker_timeout} "
                 + (f"++session_timeout={args.session_timeout} " if args.session_timeout > 0 else "")
