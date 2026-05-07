@@ -349,6 +349,15 @@ def main():
             + attn_args
         )
 
+    # Nano model server args — always based on MODEL (not orch_model), used when
+    # the nano worker runs on a separate server (e.g. --gpt-orchestrator mode).
+    nano_server_args = (
+        MODEL["server_args"]
+        + f"--reasoning-parser-plugin {cparams['reasoning_parser_path']} "
+        + h100_args
+        + attn_args
+    )
+
     # cluster_config is used to resolve benchmark input paths in multi-agent mode
     cluster_config = get_cluster_config(args.cluster)
 
@@ -394,7 +403,14 @@ def main():
             worker_models = list(args.worker_model)
             worker_types = list(args.worker_server_type)
             worker_xargs = [nano_worker_args] * len(worker_models)
-            worker_sargs = [server_args] * len(worker_models)
+            # Co-located workers (same model as orchestrator) reuse the orchestrator's
+            # server; separate workers (different model) get their own server with
+            # model-specific args. Critical for --gpt-orchestrator: nano worker must
+            # use nano_server_args (qwen3_coder parser), not GPT's server_args.
+            worker_sargs = [
+                server_args if wm == model_path else nano_server_args
+                for wm in worker_models
+            ]
             worker_gpus_list = [worker_gpus] * len(worker_models)
             worker_names = list(args.worker_names) if args.worker_names else None
 
