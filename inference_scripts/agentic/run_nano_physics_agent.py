@@ -268,6 +268,15 @@ def main():
              "CallAgentTool). Default 1200s (20 min). Increase if nano worker needs "
              "longer to solve hard problems under high concurrency.",
     )
+    ap.add_argument(
+        "--session-timeout",
+        type=int,
+        default=0,
+        help="Per-problem orchestrator timeout in seconds (0 = disabled). Caps the "
+             "total time the orchestrator may spend on a single problem (all tool-call "
+             "turns + synthesis). On expiry the output is saved as empty and the slot "
+             "is freed, preventing walltime exhaustion. Recommended: 3× --worker-timeout.",
+    )
     args = ap.parse_args()
 
     # Resolve cluster-specific hardware parameters.
@@ -385,6 +394,7 @@ def main():
                 + ("" if args.orchestrator_thinking else "++chat_template_kwargs.enable_thinking=False ")
                 + collocated_concurrency
                 + f"++tool_overrides.CallAgentTool.timeout_s={args.worker_timeout} "
+                + (f"++session_timeout={args.session_timeout} " if args.session_timeout > 0 else "")
                 + "++tool_overrides.CallAgentTool.max_injection_tokens=4000 "
                 # Re-enable collect_results: gives the model an explicit "stop delegating,
                 # collect all results now" operation.  Without it the model has no completion

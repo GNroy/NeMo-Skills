@@ -227,6 +227,13 @@ class GenerationTaskConfig:
 
     structured_output: str | None = None
 
+    # Per-session orchestrator timeout in seconds.  When set, each problem's
+    # full session (all tool-call turns + synthesis) is capped to this budget.
+    # On expiry the output is written as empty and the semaphore slot is freed
+    # immediately, preventing a slow orchestrator from consuming the SLURM
+    # walltime.  Recommended for agentic runs: 3 × worker_timeout.
+    session_timeout: int | None = None
+
     def __post_init__(self):
         self._post_init_validate_data()
         self._post_init_validate_server()
@@ -841,9 +848,18 @@ class GenerationTask:
 
     async def _generate_and_save_datapoint(self, data_point, all_data, fout, pbar):
         """Starts generation, evaluation and saves the output for a single data point."""
-        # Generate output for this single data point
         start_time = time.time()
-        output = await self.process_single_datapoint(data_point, all_data)
+        try:
+            if self.cfg.session_timeout is not None:
+                output = await asyncio.wait_for(
+                    self.process_single_datapoint(data_point, all_data),
+                    timeout=self.cfg.session_timeout,
+                )
+            else:
+                output = await self.process_single_datapoint(data_point, all_data)
+        except asyncio.TimeoutError:
+            LOG.warning("Session timed out after %ds — saving empty output.", self.cfg.session_timeout)
+            output = {"generation": ""}
         end_time = time.time()
 
         if self.cfg.add_generation_stats:
