@@ -177,13 +177,21 @@ GPT_WORKER_EXTRA_ARGS = (
 GPT_WORKER_SERVER_ARGS = JUDGE_SERVER_ARGS
 
 # When --gpt-orchestrator is set, these override the Nano MODEL defaults.
+# Tool calling requires --tool-call-parser openai and --reasoning-parser openai_gptoss;
+# these are distinct from JUDGE_SERVER_ARGS (judge never calls tools).
 GPT_ORCHESTRATOR_MODEL = {
     "short": "gpt-agent",
     "server_type": "vllm",
-    "server_args": JUDGE_SERVER_ARGS + " ",
+    "server_args": (
+        "--async-scheduling "
+        "--max-model-len 131072 "
+        "--enable-auto-tool-choice "
+        "--tool-call-parser openai "
+        "--reasoning-parser openai_gptoss "
+    ),
     "sampling_args": "++inference.temperature=0.6 ++inference.top_p=0.95 ",
     "inference_args": (
-        "++inference.tokens_to_generate=32768 "
+        "++inference.tokens_to_generate=65536 "
         "++parse_reasoning=False "
     ),
 }
@@ -211,9 +219,10 @@ def main():
         "--max-tool-calls",
         type=int,
         default=15,
-        help="Max tool calls per problem (caps runaway agentic loops). "
-             "Multi-agent orchestrator typically uses 4-8 calls; 15 gives "
-             "headroom while preventing runaway loops that exhaust the 4h SLURM timeout.",
+        help="Max tool calls per problem. For multi-agent with 2 workers "
+             "(nano + gpt), the intended workflow is exactly 3 calls: "
+             "call_nano_async + call_gpt_async + collect_results. "
+             "Use --max-tool-calls 3 to enforce this and prevent retry loops.",
     )
     ap.add_argument(
         "--no-fp8",
