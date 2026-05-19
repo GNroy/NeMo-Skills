@@ -25,6 +25,7 @@ from nemo_skills.pipeline.agent import agent
 from nemo_skills.pipeline.convert import convert
 from nemo_skills.pipeline.eval import eval
 from nemo_skills.pipeline.generate import generate
+from nemo_skills.pipeline.hermes_agent_rollouts import hermes_agent_rollouts
 from nemo_skills.pipeline.megatron_lm.train import train_megatron_lm
 from nemo_skills.pipeline.nemo_evaluator import nemo_evaluator
 from nemo_skills.pipeline.nemo_gym_rollouts import nemo_gym_rollouts

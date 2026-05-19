@@ -45,6 +45,10 @@ issues = "https://github.com/NVIDIA-NeMo/Skills/issues"
 
 [project.scripts]
 ns = "nemo_skills.pipeline.cli:app"
+# Phase 2: stdio MCP wrapper for in-process Tool classes.  See
+# nemo_skills/mcp/stdio_serve.py.  Each invocation hosts ONE Tool
+# subclass under one MCP server; Hermes consumes via mcp_servers: config.
+ns-mcp-serve = "nemo_skills.mcp.stdio_serve:main"
 
 [tool.setuptools]
 include-package-data = true
