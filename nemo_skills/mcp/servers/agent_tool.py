@@ -69,8 +69,11 @@ import asyncio
 import json
 import logging
 import os
+import threading
+import time
 import uuid
-from typing import Any, Dict, List
+from pathlib import Path
+from typing import Any, Dict, List, Optional
 
 import httpx
 
@@ -81,6 +84,16 @@ LOG = logging.getLogger(__name__)
 # Default timeout for a single agent-to-agent call (seconds).
 # Keep generous — workers may take many LLM turns to respond.
 _DEFAULT_TIMEOUT_S = 600.0
+
+# Session-id slug used for delegation traces emitted by CallAgentTool.
+# Per-call session id is not surfaced to MCP tools, so we use one shared
+# file per orchestrator process; the fleet renderer joins delegation
+# events with worker session events by ticket_id.
+_DELEGATION_SESSION_ID = "delegations"
+
+# Per-file lock for delegation jsonl appends.  Module-global so concurrent
+# CallAgentTool instances in the same process write through the same lock.
+_DELEGATION_LOCK = threading.Lock()
 
 
 class CallAgentTool(Tool):
@@ -117,6 +130,14 @@ class CallAgentTool(Tool):
             # synchronous calls and eliminates the "4-tool confusion" where the
             # model mixes blocking and async variants in the same session.
             "expose_blocking_calls": False,
+            # Optional JSONL trace sink for delegation events.  When set, the
+            # tool writes one line per dispatch and one per result/injection
+            # into ``<delegation_trace_dir>/<delegation_agent_name>/delegations.jsonl``
+            # using the same schema as the NeMo-Gym hermes_agent trace writer.
+            # The fleet renderer joins these with worker session traces by
+            # ``ticket_id`` (= the wire ``task_id``).
+            "delegation_trace_dir": None,
+            "delegation_agent_name": "orchestrator",
         }
         # Resolved at configure() time: {name: url}
         self._agent_urls: Dict[str, str] = {}
@@ -283,6 +304,38 @@ class CallAgentTool(Tool):
         raise ValueError(f"CallAgentTool: unexpected tool name '{tool_name}'")
 
     # ------------------------------------------------------------------
+    # Delegation tracing
+    # ------------------------------------------------------------------
+
+    def _emit_delegation(self, payload: Dict[str, Any]) -> None:
+        """Append one delegation event to the orchestrator's trace tree.
+
+        No-op when ``delegation_trace_dir`` is unset.  Tracing is
+        best-effort: any IO failure is swallowed with a debug log so it
+        can never take down a delegation.
+        """
+        trace_dir = self._config.get("delegation_trace_dir")
+        if not trace_dir:
+            return
+        try:
+            agent_name = self._config.get("delegation_agent_name") or "orchestrator"
+            base = Path(trace_dir) / agent_name
+            base.mkdir(parents=True, exist_ok=True)
+            event = {
+                "ts": time.time(),
+                "agent": agent_name,
+                "session_id": _DELEGATION_SESSION_ID,
+                "kind": "delegation",
+                "payload": payload,
+            }
+            line = json.dumps(event, default=str, ensure_ascii=False)
+            with _DELEGATION_LOCK:
+                with (base / f"{_DELEGATION_SESSION_ID}.jsonl").open("a", encoding="utf-8") as f:
+                    f.write(line + "\n")
+        except Exception as exc:  # noqa: BLE001 - tracing must not break tools
+            LOG.debug("CallAgentTool: delegation emit failed: %s", exc)
+
+    # ------------------------------------------------------------------
     # Blocking call
     # ------------------------------------------------------------------
 
@@ -290,7 +343,26 @@ class CallAgentTool(Tool):
         url = self._get_url(agent_name)
         if not task:
             return "Error: no task provided."
-        return await self._http_call(agent_name, url, task)
+        ticket_id = uuid.uuid4().hex
+        self._emit_delegation(
+            {
+                "mode": "blocking",
+                "worker": agent_name,
+                "ticket_id": ticket_id,
+                "task_preview": task[:200].replace("\n", " "),
+            }
+        )
+        result = await self._http_call(agent_name, url, task, task_id=ticket_id)
+        self._emit_delegation(
+            {
+                "mode": "result",
+                "worker": agent_name,
+                "ticket_id": ticket_id,
+                "ok": not str(result).startswith("Error"),
+                "result_preview": str(result)[:200],
+            }
+        )
+        return result
 
     # ------------------------------------------------------------------
     # Non-blocking (async) call
@@ -302,14 +374,26 @@ class CallAgentTool(Tool):
         if not task:
             return json.dumps({"error": "no task provided"})
 
-        ticket_id = str(uuid.uuid4())
+        ticket_id = uuid.uuid4().hex
 
         # Store metadata for the injection label (truncate for readability)
         snippet = task[:80].replace("\n", " ")
         self._ticket_meta[ticket_id] = {"agent_name": agent_name, "task_snippet": snippet}
 
-        # Fire the HTTP call as a background asyncio Task
-        bg_task = asyncio.create_task(self._http_call(agent_name, url, task))
+        self._emit_delegation(
+            {
+                "mode": "async",
+                "worker": agent_name,
+                "ticket_id": ticket_id,
+                "task_preview": task[:200].replace("\n", " "),
+            }
+        )
+
+        # Fire the HTTP call as a background asyncio Task.  Reuse the
+        # ticket_id as the wire ``task_id`` so the worker's session_id
+        # (HermesAgent._resolve_session_id) matches it — this equality
+        # is the renderer's join key between orchestrator and worker.
+        bg_task = asyncio.create_task(self._http_call(agent_name, url, task, task_id=ticket_id))
 
         # Register under request_id for scoped lookup and cleanup
         self._pending_tasks.setdefault(request_id, {})[ticket_id] = bg_task
@@ -416,6 +500,15 @@ class CallAgentTool(Tool):
                 tid,
                 agent_name,
             )
+            self._emit_delegation(
+                {
+                    "mode": "result",
+                    "worker": agent_name,
+                    "ticket_id": tid,
+                    "ok": not result.startswith("Error"),
+                    "result_preview": result[:200],
+                }
+            )
 
         return injections
 
@@ -473,9 +566,16 @@ class CallAgentTool(Tool):
             )
         return url
 
-    async def _http_call(self, agent_name: str, url: str, task: str) -> str:
+    async def _http_call(
+        self,
+        agent_name: str,
+        url: str,
+        task: str,
+        *,
+        task_id: Optional[str] = None,
+    ) -> str:
         """Perform the HTTP POST to the agent server and return its generation."""
-        task_id = str(uuid.uuid4())
+        task_id = task_id or uuid.uuid4().hex
         timeout = self._config.get("timeout_s", _DEFAULT_TIMEOUT_S)
         payload = {
             "task_id": task_id,

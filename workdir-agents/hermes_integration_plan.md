@@ -386,52 +386,116 @@ deferred.  This is documented in the README for follow-up.
 
 ## Phase 3 — Trace pipeline + multi-agent attribution
 
-**Repo:** `NeMo-Skills`
-**Touch:**
-- new: `nemo_skills/scripts/render_hermes_fleet_trace.py`
-- update `nemo_skills/mcp/servers/agent_tool.py` to optionally emit `delegation` events
-- update Phase 0 `trace_writer.py` event schema to include `agent_name` on every event
+**Status:** delivered.  7 unit tests pass (T3.1–T3.5 plus two CallAgentTool
+emit cases); 49 Phase 1+2 tests + 57 NeMo-Gym tests still green.
+
+**Repos touched:** `NeMo-Skills` and `NeMo-Gym` (Phase 0 trace writer +
+peer_agents plugin).
+
+**Files added / changed:**
+- new: `NeMo-Skills/nemo_skills/scripts/render_hermes_fleet_trace.py`
+- new: `NeMo-Skills/tests/observability/test_fleet_trace.py`
+- changed: `NeMo-Skills/nemo_skills/mcp/servers/agent_tool.py` —
+  `delegation_trace_dir` + `delegation_agent_name` config keys; emits
+  `delegation` events on blocking dispatch, async dispatch, and on
+  injection of completed async results
+- changed: `NeMo-Gym/responses_api_agents/hermes_agent/trace_writer.py` —
+  `step_callback` now forwards every kwarg (incl. `prompt_token_ids`,
+  `generation_token_ids`, `generation_log_probs`) for RL training
+- changed: `NeMo-Gym/.../hermes_home_template/plugins/peer_agents/__init__.py`
+  — emits `delegation` events around each peer call and reuses the
+  caller-supplied ticket_id as the wire `task_id`
 
 ### Event schema (`<trace_dir>/<agent>/<session_id>.jsonl`)
 
 ```json
 {
-  "ts": 1.736e9,                      // monotonic float seconds
+  "ts": 1.736e9,                      // wall-clock float seconds
   "agent": "orchestrator",            // who emitted it
-  "session_id": "20260518_abc123",    // Hermes session_id
-  "kind": "tool_start|tool_progress|tool_complete|step|assistant|thinking|delegation",
+  "session_id": "20260518_abc123",    // Hermes session_id (= wire task_id on workers)
+  "kind": "tool_start|tool_progress|tool_complete|step|assistant|thinking|delegation|session_start|session_end|status|reasoning|assistant_interim",
   "payload": {                        // kind-specific
-    // tool_start:    {tool_name, args_preview}
-    // tool_complete: {tool_name, ok, duration_ms, result_preview}
-    // delegation:    {worker, ticket_id, mode: blocking|async, task_preview}
-    // assistant:     {text, tokens_out}
-    // step:          {iteration, prompt_token_ids?, generation_token_ids?, generation_log_probs?}
+    // tool_start:    {tc_id, tool_name, args}
+    // tool_complete: {tc_id, tool_name, args, result}
+    // delegation:    {mode: blocking|async|result, worker, ticket_id, ok?, task_preview?, result_preview?}
+    // step:          {api_call_count, prev_tools, prompt_token_ids?, generation_token_ids?, generation_log_probs?}
+    // thinking:      {msg}
+    // session_start: {model, max_turns, history_len, user_message_preview}
   }
 }
 ```
 
-### `CallAgentTool` updates
+Both the orchestrator-side delegation event and the worker's
+`session_start` carry the same id — the orchestrator writes it as
+`payload.ticket_id`, the worker as `session_id` (because the Phase 0
+`/task` adapter seeds `request.state.task_id` and
+`HermesAgent._resolve_session_id` uses it).  That equality is the
+renderer's join key.
 
-When `delegation_trace_dir` is configured (the pipeline passes the same `<trace_dir>/<orchestrator>/` path), emit:
-- on dispatch (sync or async): `kind=delegation, payload.mode=...`
-- on result injection: `kind=delegation, payload.mode=result, ticket_id=...`
+### Delegation event sources
+
+Two code paths can emit delegation events, both opt-in via overlay /
+config:
+
+1. **NeMo-Gym `peer_agents` plugin** (Hermes-driven runs — the default
+   Phase 0.5 path).  Reads `trace_dir` + `agent_name` from the
+   orchestrator's overlay JSON.  Each `call_<peer>` invocation emits
+   `mode=blocking` on dispatch and `mode=result` on return.  Writes to
+   `<trace_dir>/<agent_name>/delegations.jsonl` because Hermes does not
+   surface a per-call session id to plugin handlers.
+2. **NS `CallAgentTool`** (legacy / non-Hermes orchestrators).  New
+   config keys `delegation_trace_dir` and `delegation_agent_name`.
+   Emits `mode=blocking` on `_call_blocking`, `mode=async` on
+   `_fire_async`, and `mode=result` on `get_pending_injections`.
 
 ### Fleet trace viewer
 
-`render_hermes_fleet_trace.py <output_dir>` walks `traces/**/*.jsonl`, merges by `ts`, prints a colored chronological log. Output mode `--format=json` produces a single merged JSONL useful for downstream analytics.
+`python -m nemo_skills.scripts.render_hermes_fleet_trace <output_dir>`
+walks `traces/**/*.jsonl`, merges by `ts`, and prints a colored
+chronological log.  Flags:
 
-### Tests (Phase 3)
+- `--format text|json` — text (default) or one JSON object per line
+- `--no-color` — disable ANSI colors even on a TTY
+- `--filter-agents agent1,agent2` — limit to specific emitters
+- `--filter-kinds tool_start,delegation` — limit to specific event kinds
+- `--ticket TICKET_ID` — restrict output to one delegation and its
+  matching worker session (joined on `ticket_id` ↔ `session_id`)
 
-Create `NeMo-Skills/tests/observability/test_fleet_trace.py`.
+### Tests (`tests/observability/test_fleet_trace.py`, 7 cases)
 
-Cases:
-- **T3.1** `test_event_schema_fields_required` — every event written by Phase-0 callbacks has the required fields.
-- **T3.2** `test_delegation_events_link_orchestrator_and_worker` — synthesize a dispatch on orchestrator and a session_start on worker; merge with `render_hermes_fleet_trace.py`; assert `ticket_id` ties them together.
-- **T3.3** `test_fleet_renderer_orders_by_ts` — given out-of-order writes across two agents, assert merged output is monotonic in `ts`.
-- **T3.4** `test_token_ids_preserved_in_step_events` — when `save_trajectories=True`, assert `prompt_token_ids` and `generation_token_ids` arrive in the trace (RL prep).
-- **T3.5** `test_trace_files_truncate_safely` — kill the agent process mid-write; reopen; assert no partial JSON lines in the new file.
+- **T3.1** `test_t31_event_schema_fields_required` — every event from
+  `build_callbacks(...)` plus `emit_event(...)` has the required
+  `{ts, agent, session_id, kind, payload}` keys.
+- **T3.2** `test_t32_delegation_events_link_orchestrator_and_worker` —
+  given a synthesized delegation pair on the orchestrator and a worker
+  session keyed by the same ticket, `_events_linked_to_ticket(...)`
+  returns exactly the matching events; unrelated tickets are excluded.
+- **T3.3** `test_t33_fleet_renderer_orders_by_ts` — out-of-order writes
+  across two agents merge into a monotonic ts stream via `render_main`.
+- **T3.4** `test_t34_token_ids_preserved_in_step_events` — Phase 0
+  `step_callback` now forwards `prompt_token_ids`,
+  `generation_token_ids`, and `generation_log_probs` (RL prep).
+- **T3.5** `test_t35_trace_files_truncate_safely` — a deliberately
+  truncated trailing line is skipped with a stderr warning; the renderer
+  yields the well-formed events and exits 0.
+- **CallAgentTool**: two extra cases verify the `_emit_delegation` path
+  writes a valid two-event delegation file when `delegation_trace_dir`
+  is set and is a silent no-op when it is not.
 
-**Exit criteria for Phase 3:** trace files from a multi-agent rollout can be joined into a coherent fleet timeline; token IDs survive end-to-end on at least the orchestrator.
+T3.1 and T3.4 import the Phase-0 trace writer; the test file probes
+`NEMO_GYM_PATH` env var and a couple of standard local paths, falling
+through to `pytest.skip` if NeMo-Gym is not on `sys.path`.
+
+**Exit criteria for Phase 3:**
+- [x] Trace files from a multi-agent rollout can be joined into a
+      coherent fleet timeline (renderer + T3.2 + T3.3).
+- [x] Token IDs survive end-to-end on at least the orchestrator (T3.4).
+- [x] All 7 Phase 3 unit tests green; Phases 0+0.5 (57 tests) and
+      Phases 1+2 (49 tests) regression-free.
+- [ ] Cluster smoke: multi-agent run produces a `delegations.jsonl`
+      next to per-session trace files and the renderer joins them by
+      ticket — deferred until cluster access (rolled into the same
+      Phase-1/2 cluster-smoke ticket).
 
 ---
 
@@ -493,10 +557,12 @@ No code in Phase 4 beyond enabling these flags in the manifest parser and a docs
   - [x] `tests/test_ns_mcp_serve.py` (20 cases including a real
         subprocess round-trip; Hermes-side integration deferred to a
         Phase-1 cluster smoke)
-- [ ] Phase 3 — Trace + viewer:
-  - [ ] `nemo_skills/scripts/render_hermes_fleet_trace.py`
-  - [ ] `CallAgentTool` delegation events
-  - [ ] `tests/observability/test_fleet_trace.py`
+- [x] Phase 3 — Trace + viewer:
+  - [x] `nemo_skills/scripts/render_hermes_fleet_trace.py`
+  - [x] `CallAgentTool` delegation events (NS-side)
+  - [x] NeMo-Gym `peer_agents` plugin delegation events (Hermes-side)
+  - [x] `trace_writer.step_callback` forwards token-id kwargs
+  - [x] `tests/observability/test_fleet_trace.py` (7 cases incl. T3.1–T3.5)
 - [ ] Phase 4 — Kanban hooks: manifest extension + symlink (no logic changes elsewhere)
 - [ ] Phase 5 — RL surface: deferred
 
