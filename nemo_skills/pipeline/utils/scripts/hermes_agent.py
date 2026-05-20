@@ -205,6 +205,15 @@ class HermesAgentHeadScript(BaseJobScript):
     server_address: Optional[str] = None
     sandbox: Optional[SandboxScript] = None
     gym_path: Optional[str] = None
+    # Phase 6: hermes-agent ships as a separate package (cmunley1/hermes-agent),
+    # imported as ``from run_agent import AIAgent`` inside the NeMo-Gym
+    # ``hermes_agent`` server.  NeMo-Gym's top-level ``uv sync`` does NOT
+    # pull it (the dep lives in ``responses_api_agents/hermes_agent/requirements.txt``
+    # but that file is per-server, not project-wide).  Pass the path of an
+    # already-staged hermes-agent checkout here and the head script will
+    # prepend it to PYTHONPATH before launching ``ng_run`` — same trick we
+    # use in local pytest.
+    hermes_agent_path: Optional[str] = None
     policy_api_key: str = "dummy"  # pragma: allowlist secret
     policy_model_name: Optional[str] = None
     keep_alive: bool = True
@@ -277,6 +286,20 @@ echo "=== Orchestrator {self.agent_name} ng_run ready ==="
 # ng_run remains as PID $NG_RUN_PID for the duration of the job.
 """
 
+            hermes_agent_path_export = ""
+            if self.hermes_agent_path:
+                hap_q = shlex.quote(self.hermes_agent_path)
+                # Prepend hermes-agent to PYTHONPATH so the
+                # ``from run_agent import AIAgent`` import inside
+                # responses_api_agents/hermes_agent/app.py resolves.  Doing
+                # this via PYTHONPATH instead of ``pip install -e`` avoids
+                # a network dependency on compute nodes (PyPI may be
+                # unreachable on offline clusters).
+                hermes_agent_path_export = (
+                    f'export PYTHONPATH={hap_q}:${{PYTHONPATH:-}}\n'
+                    f'echo "PYTHONPATH=$PYTHONPATH"\n'
+                )
+
             cmd = f"""set -e
 set -o pipefail
 
@@ -289,7 +312,7 @@ source .venv/bin/activate
 uv sync --active --extra dev
 echo "NeMo Gym installed."
 
-export HERMES_HOME={agent_home_q}
+{hermes_agent_path_export}export HERMES_HOME={agent_home_q}
 echo "HERMES_HOME=$HERMES_HOME"
 
 set +o pipefail

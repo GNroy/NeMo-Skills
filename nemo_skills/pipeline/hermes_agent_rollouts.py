@@ -181,7 +181,8 @@ def _build_jobs(
     server_container_override: Optional[str],
     gym_container: str,
     gym_path: Optional[str],
-    with_sandbox: bool,
+    hermes_agent_path: Optional[str] = None,
+    with_sandbox: bool = True,
     sandbox_container_override: Optional[str],
     sandbox_mounts: Optional[List[str]],
     sbatch_kwargs: Dict[str, Any],
@@ -369,6 +370,7 @@ def _build_jobs(
                         server=server_script,
                         sandbox=sandbox_script,
                         gym_path=gym_path,
+                        hermes_agent_path=hermes_agent_path,
                         policy_api_key=policy_api_key,
                         policy_model_name=policy_model_name or group.model,
                         keep_alive=not is_orch,  # orchestrator yields to ng_collect_rollouts
@@ -495,6 +497,12 @@ def hermes_agent_rollouts(
         "falling back to 'nemo-rl'.",
     ),
     gym_path: Optional[str] = typer.Option(None, help="Path to NeMo-Gym checkout (overrides auto-resolve)."),
+    hermes_agent_path: Optional[str] = typer.Option(
+        None,
+        help="Path to a hermes-agent checkout (cmunley1/hermes-agent). Prepended to "
+        "PYTHONPATH so the per-agent ng_run can ``from run_agent import AIAgent``. "
+        "Required on clusters where compute nodes don't have PyPI access.",
+    ),
     policy_api_key: str = typer.Option(
         "dummy",
         help="API key for the policy server (dummy works for local vLLM).",  # pragma: allowlist secret
@@ -575,6 +583,7 @@ def hermes_agent_rollouts(
         server_container_override=server_container,
         gym_container=resolved_gym_container,
         gym_path=gym_path,
+        hermes_agent_path=hermes_agent_path,
         with_sandbox=with_sandbox,
         sandbox_container_override=sandbox_container,
         sandbox_mounts=sandbox_mounts,
