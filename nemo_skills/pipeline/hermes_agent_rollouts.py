@@ -109,6 +109,17 @@ def _resolve_template_path(
     return f"/opt/Gym/{_DEFAULT_TEMPLATE_REL}"
 
 
+def _extract_mcp_servers(agent_spec: "HermesAgentSpec") -> Optional[Dict[str, Any]]:  # noqa: F821
+    """Pop the ``mcp_servers`` block out of the manifest's hermes overlay.
+
+    Hermes reads its MCP server map from ``<HERMES_HOME>/config.yaml``,
+    not from the NeMo-Gym HermesAgentConfig — keeping the key out of the
+    overlay JSON avoids the noisy "unknown overlay key" warning emitted
+    by ``_apply_overlay_file`` for fields HermesAgentConfig doesn't model.
+    """
+    return agent_spec.hermes.get("mcp_servers")
+
+
 def _build_overlay(
     agent_spec: "HermesAgentSpec",  # noqa: F821 - forward-ref for readability
     *,
@@ -143,8 +154,10 @@ def _build_overlay(
         "enable_compression": False,
         "terminal_backend": "docker" if sandbox_inside_container else "local",
     }
-    # Manifest overlay wins over our defaults.
-    overlay.update(agent_spec.hermes)
+    # Manifest overlay wins over our defaults.  Drop ``mcp_servers`` — it
+    # belongs in Hermes's own config.yaml (handled by the bootstrap), not
+    # in the HermesAgentConfig overlay.
+    overlay.update({k: v for k, v in agent_spec.hermes.items() if k != "mcp_servers"})
     # Peer agents (only meaningful for the orchestrator in Phase 1, but
     # kept generic so future fan-out patterns work without a schema change).
     if peer_agents:
@@ -328,6 +341,7 @@ def _build_jobs(
                         agent_home=home_for(agent.name),
                         overlay=overlay,
                         shared_kanban_db=manifest.shared_kanban_db,
+                        mcp_servers=_extract_mcp_servers(agent),
                     ),
                     container=gym_container,
                     name=f"{expname}_{agent.name}_bootstrap",

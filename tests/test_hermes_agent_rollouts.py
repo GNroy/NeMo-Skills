@@ -553,6 +553,54 @@ def test_t42_bootstrap_symlinks_shared_kanban_db(tmp_path: Path) -> None:
     assert shared_db.parent.is_dir()
 
 
+def test_bootstrap_merges_mcp_servers_into_config_yaml(tmp_path: Path) -> None:
+    """Phase 6: when ``mcp_servers`` is supplied, bootstrap merges them
+    into the template's ``config.yaml`` so Hermes picks them up at startup."""
+    template = _make_fake_template(tmp_path)
+    agent_home = tmp_path / "agents" / "orch" / "hermes_home"
+
+    script = HermesHomeBootstrapScript(
+        template_path=str(template),
+        agent_home=str(agent_home),
+        overlay={"agent_name": "orch"},
+        mcp_servers={
+            "ns_python_tool": {
+                "command": "python",
+                "args": ["-m", "nemo_skills.mcp.servers.python_tool"],
+            },
+            "ns_periodictable": {
+                "command": "ns-mcp-serve",
+                "args": ["nemo_skills.mcp.servers.chemistry.periodictable_tool:PeriodictableTool"],
+            },
+        },
+    )
+    _run_inline_script(script)
+
+    import yaml as _yaml
+
+    cfg = _yaml.safe_load((agent_home / "config.yaml").read_text())
+    assert "mcp_servers" in cfg
+    assert set(cfg["mcp_servers"]) == {"ns_python_tool", "ns_periodictable"}
+    assert cfg["mcp_servers"]["ns_python_tool"]["command"] == "python"
+    assert cfg["mcp_servers"]["ns_periodictable"]["command"] == "ns-mcp-serve"
+
+
+def test_bootstrap_skips_mcp_merge_when_unset(tmp_path: Path) -> None:
+    """Default (no mcp_servers) leaves the template's config.yaml untouched."""
+    template = _make_fake_template(tmp_path)
+    agent_home = tmp_path / "agents" / "orch" / "hermes_home"
+
+    script = HermesHomeBootstrapScript(
+        template_path=str(template),
+        agent_home=str(agent_home),
+        overlay={"agent_name": "orch"},
+    )
+    _run_inline_script(script)
+
+    cfg_text = (agent_home / "config.yaml").read_text()
+    assert cfg_text == (template / "config.yaml").read_text()
+
+
 def test_t42_bootstrap_no_symlink_when_kanban_not_set(tmp_path: Path) -> None:
     """Default (no shared_kanban_db) leaves no kanban.db artifact behind."""
     template = _make_fake_template(tmp_path)

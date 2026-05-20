@@ -1,0 +1,102 @@
+# Single-agent Hermes manifest for the frontier-science validation experiment.
+#
+# Layout:
+#   * One orchestrator running Kimi-K2.6 on 8 GPUs (2 nodes x 4 GPUs on AWS-CMH).
+#   * Every Hermes built-in toolset relevant to scientific research enabled.
+#   * Every NeMo-Skills MCP server attached (group A = native FastMCP via
+#     ``python -m``; group B = wrapped via ``ns-mcp-serve``).
+#   * No worker peers, no kanban dispatcher — this is the smallest fleet
+#     that still exercises the Hermes runtime end-to-end.
+#
+# A/B-control design (driver: scripts/run_validation.py):
+#   * Run 0  baseline    persist_memory=false, no merge-back, frozen template
+#   * Run 1  learning    persist_memory=true,  merge-back ON  → updates template
+#   * Run 2  evaluation  persist_memory=true,  no merge-back, warm template
+#   Compare Run 0 vs Run 2 to isolate the memory-effect from intra-run
+#   learning; Run 1 vs Run 2 reads as "stable across two warm runs".
+
+template_hermes_home: /alaptev/hermes_home/frontier_validation  # editable: persists across the 3 runs
+trace_dir_subpath: traces
+
+sandbox:
+  # Phase-3 trace + delegation files land under the standard subpath.
+  mounts: []
+
+agents:
+  scientist:
+    # Single orchestrator — no peers, single-agent mode validates the
+    # core Hermes runtime + MCP plumbing without multi-agent confound.
+    role: orchestrator
+    model: /hf_models/Kimi-K2.6
+    server_type: vllm
+    server_gpus: 4              # GB300 4 GPUs/node
+    server_nodes: 2             # tensor-parallel 8 across both nodes
+    server_args: >-
+      --enable-expert-parallel
+      --distributed-executor-backend=ray
+      --tensor-parallel-size 8
+      --compilation-config '{"pass_config": {"fuse_allreduce_rms": false}}'
+      --max-model-len 131072
+      --trust-remote-code
+    hermes:
+      max_turns: 100            # frontier-science problems can need many tool turns
+      # Hermes built-in toolsets we want active for science research.
+      # Disable kanban + cronjob + send_message + delegate (no peers in
+      # single-agent mode).
+      enabled_toolsets:
+        - terminal
+        - file
+        - code_execution
+        - web
+        - skills
+        - memory
+        - browser
+      disabled_toolsets:
+        - send_message
+        - cronjob
+        - kanban
+        - delegate
+      # Persistence — flipped per-run by the validation driver.
+      persist_memory: true
+      persist_skills: true
+      persist_session: false
+      save_trajectories: true   # carries RL token IDs into the JSONL traces
+      enable_compression: false
+      terminal_backend: docker  # use the NeMo-Skills sandbox container
+      # Kimi-K2.6 uses ``thinking`` (boolean) instead of Qwen's
+      # ``enable_thinking`` — see HermesAgentConfig.chat_template_kwargs.
+      chat_template_kwargs:
+        thinking: false
+      # NS MCP servers exposed to Hermes.  Group A uses python -m for
+      # native FastMCP entrypoints; group B uses ns-mcp-serve to wrap
+      # in-process Tool classes.  See nemo_skills/mcp/servers/README.md.
+      mcp_servers:
+        # ---- Group A (native FastMCP via python -m) ------------------
+        ns_python_tool:
+          command: python
+          args: [-m, nemo_skills.mcp.servers.python_tool]
+        ns_tavily:
+          command: python
+          args: [-m, nemo_skills.mcp.servers.tavily_search_tool]
+        ns_exa:
+          command: python
+          args: [-m, nemo_skills.mcp.servers.exa_tool]
+        # ---- Group B (wrapped via ns-mcp-serve) ----------------------
+        ns_periodictable:
+          command: ns-mcp-serve
+          args: ["nemo_skills.mcp.servers.chemistry.periodictable_tool:PeriodictableTool"]
+        ns_coolprop:
+          command: ns-mcp-serve
+          args: ["nemo_skills.mcp.servers.physics.coolprop_tool:CoolPropTool"]
+        ns_particle:
+          command: ns-mcp-serve
+          args: ["nemo_skills.mcp.servers.physics.particle_tool:ParticleTool"]
+        ns_radioactivedecay:
+          command: ns-mcp-serve
+          args: ["nemo_skills.mcp.servers.physics.radioactivedecay_tool:RadioactivedecayTool"]
+        ns_arxiv:
+          command: ns-mcp-serve
+          args: ["nemo_skills.mcp.servers.web.arxiv_tool:ArxivSearchTool"]
+        ns_wikipedia:
+          command: ns-mcp-serve
+          args: ["nemo_skills.mcp.servers.web.wikipedia_tool:WikipediaSearchTool"]

@@ -708,6 +708,43 @@ so non-RL runs don't pay the storage cost.
   - [x] `nemo_skills/scripts/export_hermes_trajectories.py`
   - [x] `tests/observability/test_trajectory_export.py`
   - [ ] cluster-smoke: full trajectory_compressor run (deferred)
+- [x] Phase 6 — Validation experiment (scaffolding, ready to submit):
+  - [x] NeMo-Gym `resources_servers/passthrough/` (no-op verifier so
+        offline judges grade the generation later)
+  - [x] NeMo-Gym `HermesAgentConfig.chat_template_kwargs` knob (Kimi
+        uses `thinking=false`, not the Qwen `enable_thinking`)
+  - [x] NS bootstrap merges `mcp_servers` into `<HERMES_HOME>/config.yaml`
+        so Hermes picks the manifest-declared MCPs up at startup
+  - [x] `workdir-agents/validation/frontierscience_manifest.yaml` —
+        single Hermes agent on Kimi-K2.6 with every built-in toolset
+        + all NS MCP servers
+  - [x] `workdir-agents/validation/scripts/`: convert_ns_to_ng,
+        convert_ng_to_ns, run_validation (3-run driver),
+        submit_judges (gpt-oss-120b), compare_runs (delta table)
+  - [x] `tests/test_hermes_agent_rollouts.py` extends with bootstrap
+        ↔ mcp_servers merge regression cases
+  - [ ] Cluster run on aws-cmh — pending user mirroring Oleksii's
+        `vllm-glm51-cu130-ray.sqsh` container + the model checkpoint
+        availability at `/hf_models/Kimi-K2.6`
+
+## Phase 6 — Validation experiment (frontierscience-olympiad)
+
+**Status:** scaffolding delivered locally, ready for cluster submit.
+
+**Goal:** answer the headline question "does the agent's memory/skill
+update (Phase 1 merge-back) actually improve accuracy on a hard
+scientific-research benchmark when the agent has every tool/MCP
+available?"  Three-run A/B/C with Kimi-K2.6 as the orchestrator on
+`aws-cmh`, judged offline by `gpt-oss-120b` (same pattern as
+`inference_scripts/agentic/run_nano_physics_agent.py`).
+
+Full layout, smoke + full-100 recipes, and the comparator output are
+documented in [`workdir-agents/validation/README.md`](validation/README.md).
+
+The Phase 6 NeMo-Gym additions (passthrough verifier +
+`chat_template_kwargs` knob) are the smallest NeMo-Gym surface that
+keeps `hermes_agent_rollouts` runnable against benchmarks whose judge
+lives entirely in NeMo-Skills.
 
 ## How to verify progressively
 
@@ -720,6 +757,7 @@ Each phase has a smoke command we should run before moving on.
 | 2 | same as Phase 1 + manifest with `ns_python_tool` enabled; inspect trace for `ns_python_tool.*` tool calls | MCP wrapping & schema sanity |
 | 3 | Phase 1 manifest with orchestrator + 1 worker; run `render_hermes_fleet_trace.py /tmp/h3` | per-agent traces join cleanly on ticket_id |
 | 4 | manifest with `shared_kanban_db` + 1 dispatcher + 2 workers; verify `kanban list` shows tasks created by orchestrator | kanban hooks active without breaking Phase 1/2/3 |
+| 6 | `python workdir-agents/validation/scripts/run_validation.py --limit 5 --dry-run ...` then submit + `compare_runs.py` | 3-run A/B/C wiring works end-to-end, frontier-science answer survives NS↔NG conversion both ways |
 
 ## Risks & mitigations
 

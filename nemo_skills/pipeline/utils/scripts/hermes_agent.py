@@ -38,7 +38,7 @@ from __future__ import annotations
 import json
 import shlex
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from nemo_skills.pipeline.utils.scripts.base import BaseJobScript
 from nemo_skills.pipeline.utils.scripts.server import SandboxScript, ServerScript
@@ -81,6 +81,11 @@ class HermesHomeBootstrapScript(BaseJobScript):
     # every agent in the fleet sees the same kanban board.  The dispatcher
     # het-group reads/writes the same file.  No-op when ``None``.
     shared_kanban_db: Optional[str] = None
+    # Phase 6 (validation): per-agent MCP server map merged into
+    # ``<agent_home>/config.yaml``'s ``mcp_servers:`` key so Hermes
+    # picks the servers up at startup.  None → leave template's
+    # mcp_servers block untouched (empty by default).
+    mcp_servers: Optional[Dict[str, Any]] = None
     log_prefix: str = field(default="hermes_bootstrap", init=False)
     span_group_nodes: bool = False  # one-shot setup on the master node
 
@@ -102,6 +107,39 @@ class HermesHomeBootstrapScript(BaseJobScript):
         else:
             kanban_snippet = ""
 
+        if self.mcp_servers:
+            # Inline Python step: read the template config.yaml that rsync
+            # just produced, merge the manifest-supplied ``mcp_servers``
+            # map into it, and write it back.  Idempotent — a re-bootstrap
+            # just re-merges with the same data.  We pass the JSON via a
+            # heredoc so YAML quoting in the manifest cannot break the
+            # shell command.
+            mcp_servers_json = json.dumps(self.mcp_servers, sort_keys=True)
+            mcp_snippet = f"""
+python3 - <<'PY'
+import json
+import os
+
+import yaml
+
+agent_home = {repr(self.agent_home)}
+mcp_servers = json.loads({repr(mcp_servers_json)})
+config_path = os.path.join(agent_home, "config.yaml")
+data = {{}}
+if os.path.isfile(config_path):
+    with open(config_path) as f:
+        data = yaml.safe_load(f) or {{}}
+existing = data.get("mcp_servers") or {{}}
+existing.update(mcp_servers)
+data["mcp_servers"] = existing
+with open(config_path, "w") as f:
+    yaml.safe_dump(data, f, sort_keys=True)
+print(f"mcp_servers merged into {{config_path}}: {{sorted(existing)}}")
+PY
+"""
+        else:
+            mcp_snippet = ""
+
         cmd = f"""set -euo pipefail
 echo "=== Hermes bootstrap: {self.agent_home} ==="
 mkdir -p {agent_home_q}
@@ -116,7 +154,7 @@ fi
 # Write the per-agent overlay JSON the HermesAgent reads at startup.
 mkdir -p {agent_home_q}
 printf '%s' {overlay_q} > {agent_home_q}/hermes_agent_overlay.json
-{kanban_snippet}echo "Bootstrap done."
+{kanban_snippet}{mcp_snippet}echo "Bootstrap done."
 """
         self.set_inline(cmd)
         super().__post_init__()
