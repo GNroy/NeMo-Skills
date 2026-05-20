@@ -143,8 +143,22 @@ PY
         cmd = f"""set -euo pipefail
 echo "=== Hermes bootstrap: {self.agent_home} ==="
 mkdir -p {agent_home_q}
-# Trailing slash on source so we copy *contents* into the target.
-rsync -a --delete --exclude='.git' {template_q}/ {agent_home_q}/
+
+# Copy the template into the per-agent dir via Python so we don't
+# depend on rsync being installed in the container (some NS-built
+# images don't ship it).  shutil.copytree mirrors the --delete
+# semantics by clearing the target first.
+python3 - <<'PY'
+import os
+import shutil
+
+template = {repr(self.template_path)}
+agent_home = {repr(self.agent_home)}
+if os.path.isdir(agent_home):
+    shutil.rmtree(agent_home)
+shutil.copytree(template, agent_home, ignore=shutil.ignore_patterns(".git"), symlinks=True)
+print(f"copied {{template}} -> {{agent_home}}")
+PY
 
 # env.example -> .env  (the template ships env.example to dodge .gitignore)
 if [ -f {agent_home_q}/env.example ] && [ ! -f {agent_home_q}/.env ]; then
@@ -155,6 +169,19 @@ fi
 mkdir -p {agent_home_q}
 printf '%s' {overlay_q} > {agent_home_q}/hermes_agent_overlay.json
 {kanban_snippet}{mcp_snippet}echo "Bootstrap done."
+
+# Stay alive for the lifetime of the parallel CommandGroup *only* when
+# running inside SLURM.  NeMo-Run's parallel-srun model treats *any*
+# command exiting (even successfully) as "main task done → kill the
+# rest", so a transient setup step would tear down server/sandbox/
+# rollouts before they can do their job.  The rollouts step is the
+# real driver; when it exits, this sleep gets killed alongside
+# server + sandbox.  Local pytest runs the inline script via
+# ``subprocess.run`` and would block forever, so we no-op outside SLURM.
+if [ -n "${{SLURM_JOB_ID:-}}" ]; then
+    trap 'echo "bootstrap srun received SIGTERM, exiting"; exit 0' TERM
+    sleep infinity
+fi
 """
         self.set_inline(cmd)
         super().__post_init__()

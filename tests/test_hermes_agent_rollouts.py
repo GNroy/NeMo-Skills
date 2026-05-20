@@ -451,7 +451,10 @@ def test_t18_pipeline_dry_run_validates_full_manifest() -> None:
     assert any(n.endswith("_server") for n in orch_names)
     assert any(n.endswith("_sandbox") for n in orch_names)
     assert "hermes_test_orch_bootstrap" in orch_names
-    assert "hermes_test_orch_head" in orch_names
+    # The orchestrator does NOT get a separate HermesAgentHeadScript —
+    # its NemoGymRolloutsScript already spins up ng_run + collect on the
+    # same node.  Two ng_run processes would conflict on the agent port.
+    assert "hermes_test_orch_head" not in orch_names
     assert "hermes_test_analyst_bootstrap" in orch_names
     assert "hermes_test_analyst_head" in orch_names
     assert "hermes_test_orch_rollouts" in orch_names
@@ -500,7 +503,8 @@ def test_single_agent_manifest_produces_single_group() -> None:
     grp: CommandGroup = job["group"]
     names = [c.name for c in grp.commands]
     assert "solo_only_bootstrap" in names
-    assert "solo_only_head" in names
+    # Single-agent: the orchestrator's rollouts script owns ng_run, no head.
+    assert "solo_only_head" not in names
     assert "solo_only_rollouts" in names
 
 
@@ -662,10 +666,11 @@ def test_pipeline_with_dispatcher_builds_two_groups() -> None:
     orch_names = [c.name for c in orch_group.commands]
     disp_names = [c.name for c in disp_group.commands]
 
-    # Orchestrator group: LLM server + bootstrap + head + rollouts.
+    # Orchestrator group: LLM server + bootstrap + rollouts (NemoGymRolloutsScript
+    # owns ng_run for the orchestrator — see test_t18 comment).
     assert any(n.endswith("_g0_server") for n in orch_names)
     assert "kdtest_orch_bootstrap" in orch_names
-    assert "kdtest_orch_head" in orch_names
+    assert "kdtest_orch_head" not in orch_names
     assert "kdtest_orch_rollouts" in orch_names
 
     # Dispatcher group: NO LLM server, NO sandbox, NO head — only bootstrap + dispatcher.

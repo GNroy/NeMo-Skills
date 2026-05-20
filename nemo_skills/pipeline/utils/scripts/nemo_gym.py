@@ -58,6 +58,13 @@ class NemoGymRolloutsScript(BaseJobScript):
     server_address: Optional[str] = None
     sandbox: Optional["SandboxScript"] = None
     gym_path: Optional[str] = None
+    # Phase 6: when running an orchestrator backed by NeMo-Gym's
+    # ``hermes_agent`` server, point this at a staged hermes-agent
+    # checkout so ``from run_agent import AIAgent`` resolves without a
+    # pip install on the compute node.  Passed via the inline command's
+    # ``HERMES_AGENT_PATH`` env var; the snippet that prepends it to
+    # PYTHONPATH lives above in the build_cmd body.
+    hermes_agent_path: Optional[str] = None
     policy_api_key: str = "dummy"
     policy_model_name: Optional[str] = None
 
@@ -156,6 +163,18 @@ source .venv/bin/activate || {{ echo "ERROR: Failed to activate venv"; exit 1; }
 uv sync --active --extra dev || {{ echo "ERROR: Failed to sync dependencies"; exit 1; }}
 echo "NeMo Gym installed successfully"
 
+# Phase 6: hermes_agent imports ``from run_agent import AIAgent`` from
+# the separate hermes-agent package.  When the orchestrator is the
+# NeMo-Gym ``hermes_agent`` server, the caller exports ``HERMES_AGENT_PATH``
+# pointing at a staged checkout — prepend it to PYTHONPATH so the import
+# works without a pip-install round-trip on (potentially offline) compute
+# nodes.  No-op when the env var is unset, so non-Hermes callers are
+# unaffected.
+if [ -n "${{HERMES_AGENT_PATH:-}}" ]; then
+    export PYTHONPATH="$HERMES_AGENT_PATH:${{PYTHONPATH:-}}"
+    echo "Prepended hermes-agent to PYTHONPATH: $HERMES_AGENT_PATH"
+fi
+
 # Disable pipefail for the polling loop (grep may return non-zero)
 set +o pipefail
 
@@ -221,6 +240,8 @@ echo "Servers terminated."
             if self.sandbox is not None:
                 env_vars["NEMO_SKILLS_SANDBOX_HOST"] = self.sandbox.hostname_ref()
                 env_vars["NEMO_SKILLS_SANDBOX_PORT"] = str(self.sandbox.port)
+            if self.hermes_agent_path:
+                env_vars["HERMES_AGENT_PATH"] = self.hermes_agent_path
 
             return cmd.strip(), {"environment": env_vars}
 

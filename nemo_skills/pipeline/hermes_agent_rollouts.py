@@ -360,49 +360,71 @@ def _build_jobs(
                     )
                 )
                 continue
-            commands.append(
-                Command(
-                    script=HermesAgentHeadScript(
-                        config_paths=["responses_api_agents/hermes_agent/configs/hermes_agent.yaml"],
-                        agent_home=home_for(agent.name),
-                        agent_port=agent_ports[agent.name],
-                        agent_name=agent.name,
-                        server=server_script,
-                        sandbox=sandbox_script,
-                        gym_path=gym_path,
-                        hermes_agent_path=hermes_agent_path,
-                        policy_api_key=policy_api_key,
-                        policy_model_name=policy_model_name or group.model,
-                        keep_alive=not is_orch,  # orchestrator yields to ng_collect_rollouts
-                    ),
-                    container=gym_container,
-                    name=f"{expname}_{agent.name}_head",
+            # Workers run a persistent HermesAgentHeadScript that keeps
+            # ng_run alive for /task calls from the orchestrator.  The
+            # orchestrator does NOT get its own HermesAgentHeadScript —
+            # NemoGymRolloutsScript (added below for the orchestrator
+            # group) already spins up ng_run + ng_collect_rollouts and
+            # cleans up at the end.  Two ng_run processes on the same
+            # node would conflict on the agent port.
+            if not is_orch:
+                commands.append(
+                    Command(
+                        script=HermesAgentHeadScript(
+                            config_paths=["responses_api_agents/hermes_agent/configs/hermes_agent.yaml"],
+                            agent_home=home_for(agent.name),
+                            agent_port=agent_ports[agent.name],
+                            agent_name=agent.name,
+                            server=server_script,
+                            sandbox=sandbox_script,
+                            gym_path=gym_path,
+                            hermes_agent_path=hermes_agent_path,
+                            policy_api_key=policy_api_key,
+                            policy_model_name=policy_model_name or group.model,
+                            keep_alive=True,
+                        ),
+                        container=gym_container,
+                        name=f"{expname}_{agent.name}_head",
+                    )
                 )
-            )
 
         # 4. Orchestrator group additionally runs ng_collect_rollouts and
         #    the optional merge-back step.
         if any(a.name == orchestrator.name for a in group.agents):
             output_file = f"{output_dir}/rollouts.jsonl"
+            # ng_run needs three NeMo-Gym configs composed: the
+            # passthrough resources server (no-op verifier), the
+            # bundled hermes_agent (whose ``resources_server.name`` is
+            # ``???`` until we override it), and the vllm policy model.
+            # Without the resources server, Hydra raises on the ???
+            # placeholder; without the policy model entry, ng_run has
+            # nowhere to put the ``+policy_base_url`` override below.
+            orch_home = home_for(orchestrator.name)
             commands.append(
                 Command(
                     script=NemoGymRolloutsScript(
-                        # Re-use the standard rollouts script — it polls
-                        # ng_status until ready then runs ng_collect_rollouts
-                        # against the orchestrator's local ng_run instance.
                         config_paths=[
+                            "resources_servers/passthrough/configs/passthrough.yaml",
                             "responses_api_agents/hermes_agent/configs/hermes_agent.yaml",
+                            "responses_api_models/vllm_model/configs/vllm_model.yaml",
                         ],
                         input_file=input_file,
                         output_file=output_file,
                         # Force the rollouts script to talk to the orchestrator's
-                        # hermes_agent (override the agent_name).
+                        # hermes_agent and to wire the per-agent HERMES_HOME so
+                        # the overlay JSON (agent_name, trace_dir, persistence)
+                        # gets picked up by HermesAgent._apply_overlay_file.
                         extra_arguments=(
-                            f"+agent_name={orchestrator.name}_hermes_agent " + extra_arguments
+                            f"+agent_name=hermes_agent "
+                            f"+hermes_agent.responses_api_agents.hermes_agent.resources_server.name=passthrough "
+                            f'+hermes_agent.responses_api_agents.hermes_agent.hermes_home="{orch_home}" '
+                            f'+hermes_agent.responses_api_agents.hermes_agent.agent_name="{orchestrator.name}" '
+                            + extra_arguments
                         ).strip(),
                         server=server_script,
                         sandbox=sandbox_script,
                         gym_path=gym_path,
+                        hermes_agent_path=hermes_agent_path,
                         policy_api_key=policy_api_key,
                         policy_model_name=policy_model_name or group.model,
                     ),
