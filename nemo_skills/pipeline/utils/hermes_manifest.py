@@ -44,16 +44,28 @@ import yaml
 class HermesAgentSpec:
     """One agent entry from the manifest.
 
-    Either ``model`` or ``model_share`` must be set (exactly one):
+    For ``kind="agent"`` (the default), either ``model`` or
+    ``model_share`` must be set (exactly one):
       - ``model`` → this agent owns an LLM server with the given path.
       - ``model_share`` → this agent piggybacks on another agent's LLM
         server (co-located in the same het-group, no extra GPU spend).
+
+    For ``kind="dispatcher"`` (Phase 4 kanban hooks), no model is
+    required: the entry stands up a separate het-group running the
+    Hermes kanban dispatcher daemon (``hermes kanban dispatcher run``)
+    instead of a hermes_agent server.  See the Phase 4 design notes in
+    ``workdir-agents/hermes_integration_plan.md``.
     """
 
     name: str
     role: str = "worker"  # "orchestrator" or "worker"; exactly one orchestrator per manifest
 
-    # LLM placement — exactly one of model / model_share is set.
+    # Phase 4: ``"agent"`` (default) runs a hermes_agent server.
+    # ``"dispatcher"`` runs the kanban dispatcher daemon and has no LLM.
+    kind: str = "agent"
+
+    # LLM placement — exactly one of model / model_share is set
+    # (only required when ``kind == "agent"``).
     model: Optional[str] = None
     model_share: Optional[str] = None
 
@@ -73,6 +85,10 @@ class HermesAgentSpec:
     # orchestrator in Phase 1; ignored otherwise.
     workers: List[str] = field(default_factory=list)
 
+    # CPU/memory hints for dispatcher het-groups (ignored when ``kind == "agent"``).
+    dispatcher_cpus: int = 2
+    dispatcher_mem_gb: int = 8
+
 
 @dataclass
 class HermesFleetManifest:
@@ -82,6 +98,11 @@ class HermesFleetManifest:
     template_hermes_home: Optional[str] = None
     trace_dir_subpath: str = "traces"
     sandbox_mounts: List[str] = field(default_factory=list)
+    # Phase 4 (deferred runtime, design-only here): when set, the bootstrap
+    # script symlinks ``<hermes_home>/kanban.db`` to this shared path so
+    # every agent in the fleet sees the same kanban board.  Pair with a
+    # ``kind: dispatcher`` agent entry to actually run the daemon.
+    shared_kanban_db: Optional[str] = None
 
     @property
     def orchestrator(self) -> HermesAgentSpec:
@@ -103,18 +124,31 @@ class ServerGroup:
 
     Workers in the same group run on the same node(s) as the LLM server,
     with the orchestrator always in het-group 0.
+
+    Dispatcher groups (``is_dispatcher=True``) carry a single
+    ``kind=dispatcher`` owner and have no LLM server — ``model``,
+    ``server_type``, ``server_gpus``, ``server_nodes``, ``server_args``
+    all return safe placeholders so the pipeline can branch on the flag
+    without re-reading the agent spec.
     """
 
     het_group: int
     # The agent whose ``model`` field defines the LLM server for this group.
     # All other agents in this group have ``model_share == owner.name``.
+    # For dispatcher groups this is the dispatcher entry itself.
     owner: HermesAgentSpec
     agents: List[HermesAgentSpec]
 
     @property
+    def is_dispatcher(self) -> bool:
+        return self.owner.kind == "dispatcher"
+
+    @property
     def model(self) -> str:
-        # ``owner.model`` is guaranteed non-empty by parse_manifest.
-        return self.owner.model  # type: ignore[return-value]
+        # ``owner.model`` is guaranteed non-empty by parse_manifest for
+        # kind=agent owners; dispatcher groups have no LLM and callers
+        # must check ``is_dispatcher`` before using this.
+        return self.owner.model or ""
 
     @property
     def server_type(self) -> str:
@@ -122,7 +156,7 @@ class ServerGroup:
 
     @property
     def server_gpus(self) -> int:
-        return self.owner.server_gpus
+        return 0 if self.is_dispatcher else self.owner.server_gpus
 
     @property
     def server_nodes(self) -> int:
@@ -174,14 +208,18 @@ def parse_manifest(source: Union[str, Path, Dict[str, Any]]) -> HermesFleetManif
 
         agents.append(_spec_from_dict(name, spec))
 
-    # Validate orchestrator cardinality.
-    orchestrators = [a for a in agents if a.role == "orchestrator"]
+    # Validate orchestrator cardinality.  Dispatcher entries are excluded
+    # from the orchestrator-pick fallback — they cannot orchestrate rollouts.
+    runnable_agents = [a for a in agents if a.kind == "agent"]
+    if not runnable_agents:
+        raise ValueError("manifest has no kind=agent entries; nothing to orchestrate")
+    orchestrators = [a for a in runnable_agents if a.role == "orchestrator"]
     if not orchestrators:
-        # Default rule: first agent in the manifest is the orchestrator
-        # unless someone explicitly named one.  Lets short single-orchestrator
-        # manifests omit `role:` boilerplate.
-        agents[0].role = "orchestrator"
-        orchestrators = [agents[0]]
+        # Default rule: first runnable agent in the manifest is the
+        # orchestrator unless someone explicitly named one.  Lets short
+        # single-orchestrator manifests omit `role:` boilerplate.
+        runnable_agents[0].role = "orchestrator"
+        orchestrators = [runnable_agents[0]]
     if len(orchestrators) > 1:
         names = [a.name for a in orchestrators]
         raise ValueError(f"manifest has multiple orchestrators: {names!r}")
@@ -189,6 +227,22 @@ def parse_manifest(source: Union[str, Path, Dict[str, Any]]) -> HermesFleetManif
     # Validate model placement and model_share targets.
     by_name = {a.name: a for a in agents}
     for a in agents:
+        if a.kind == "dispatcher":
+            # Dispatcher: no LLM, no peer-routing.  Reject keys that only
+            # make sense for a kind=agent entry so typos become loud.
+            if a.model or a.model_share:
+                raise ValueError(
+                    f"agent {a.name!r}: kind=dispatcher must not declare 'model' or 'model_share'"
+                )
+            if a.role == "orchestrator":
+                raise ValueError(f"agent {a.name!r}: dispatcher cannot also be the orchestrator")
+            if a.workers:
+                raise ValueError(f"agent {a.name!r}: dispatcher cannot declare 'workers'")
+            continue
+        if a.kind != "agent":
+            raise ValueError(
+                f"agent {a.name!r}: unknown kind={a.kind!r}; expected 'agent' or 'dispatcher'"
+            )
         if a.model and a.model_share:
             raise ValueError(f"agent {a.name!r}: set exactly one of 'model' / 'model_share'")
         if not a.model and not a.model_share:
@@ -198,6 +252,11 @@ def parse_manifest(source: Union[str, Path, Dict[str, Any]]) -> HermesFleetManif
             if owner is None:
                 raise ValueError(
                     f"agent {a.name!r}: model_share={a.model_share!r} is not a declared agent"
+                )
+            if owner.kind != "agent":
+                raise ValueError(
+                    f"agent {a.name!r}: model_share={a.model_share!r} resolves to a "
+                    f"{owner.kind!r} entry; only kind=agent peers can host a shared LLM"
                 )
             if not owner.model:
                 raise ValueError(
@@ -232,6 +291,7 @@ def parse_manifest(source: Union[str, Path, Dict[str, Any]]) -> HermesFleetManif
         template_hermes_home=data.get("template_hermes_home"),
         trace_dir_subpath=data.get("trace_dir_subpath", "traces"),
         sandbox_mounts=list(data.get("sandbox", {}).get("mounts", []) or []),
+        shared_kanban_db=data.get("shared_kanban_db"),
     )
 
 
@@ -243,6 +303,7 @@ def _spec_from_dict(name: str, spec: Dict[str, Any]) -> HermesAgentSpec:
     """
     known = {
         "role",
+        "kind",
         "model",
         "model_share",
         "server_type",
@@ -251,6 +312,8 @@ def _spec_from_dict(name: str, spec: Dict[str, Any]) -> HermesAgentSpec:
         "server_args",
         "hermes",
         "workers",
+        "dispatcher_cpus",
+        "dispatcher_mem_gb",
     }
     extra = set(spec.keys()) - known
     if extra:
@@ -259,6 +322,7 @@ def _spec_from_dict(name: str, spec: Dict[str, Any]) -> HermesAgentSpec:
     return HermesAgentSpec(
         name=name,
         role=spec.get("role", "worker"),
+        kind=spec.get("kind", "agent"),
         model=spec.get("model"),
         model_share=spec.get("model_share"),
         server_type=spec.get("server_type", "vllm"),
@@ -267,6 +331,8 @@ def _spec_from_dict(name: str, spec: Dict[str, Any]) -> HermesAgentSpec:
         server_args=spec.get("server_args", ""),
         hermes=dict(spec.get("hermes", {}) or {}),
         workers=list(spec.get("workers", []) or []),
+        dispatcher_cpus=int(spec.get("dispatcher_cpus", 2)),
+        dispatcher_mem_gb=int(spec.get("dispatcher_mem_gb", 8)),
     )
 
 
@@ -303,6 +369,11 @@ def build_server_groups(manifest: HermesFleetManifest) -> List[ServerGroup]:
     next_het = 1
     for a in manifest.agents:
         if a is orchestrator:
+            continue
+        if a.kind == "dispatcher":
+            # Each dispatcher gets its own het-group with no LLM.
+            groups[a.name] = ServerGroup(het_group=next_het, owner=a, agents=[a])
+            next_het += 1
             continue
         if a.model:
             # New owner group.

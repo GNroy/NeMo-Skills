@@ -77,6 +77,10 @@ class HermesHomeBootstrapScript(BaseJobScript):
     template_path: str
     agent_home: str
     overlay: Dict[str, object] = field(default_factory=dict)
+    # Phase 4: when set, symlink ``<agent_home>/kanban.db`` to this path so
+    # every agent in the fleet sees the same kanban board.  The dispatcher
+    # het-group reads/writes the same file.  No-op when ``None``.
+    shared_kanban_db: Optional[str] = None
     log_prefix: str = field(default="hermes_bootstrap", init=False)
     span_group_nodes: bool = False  # one-shot setup on the master node
 
@@ -87,6 +91,16 @@ class HermesHomeBootstrapScript(BaseJobScript):
         agent_home_q = shlex.quote(self.agent_home)
         overlay_json = json.dumps(self.overlay, sort_keys=True)
         overlay_q = shlex.quote(overlay_json)
+
+        if self.shared_kanban_db:
+            kanban_q = shlex.quote(self.shared_kanban_db)
+            kanban_snippet = (
+                f'mkdir -p "$(dirname {kanban_q})"\n'
+                f"touch {kanban_q}\n"
+                f"ln -sf {kanban_q} {agent_home_q}/kanban.db\n"
+            )
+        else:
+            kanban_snippet = ""
 
         cmd = f"""set -euo pipefail
 echo "=== Hermes bootstrap: {self.agent_home} ==="
@@ -102,7 +116,7 @@ fi
 # Write the per-agent overlay JSON the HermesAgent reads at startup.
 mkdir -p {agent_home_q}
 printf '%s' {overlay_q} > {agent_home_q}/hermes_agent_overlay.json
-echo "Bootstrap done."
+{kanban_snippet}echo "Bootstrap done."
 """
         self.set_inline(cmd)
         super().__post_init__()
@@ -316,6 +330,50 @@ python -m nemo_skills.scripts.merge_hermes_home \\
     {dry_flag} \\
     -- {sources_q}
 echo "Merge-back done. Audit: {self.audit_path}"
+"""
+        self.set_inline(cmd)
+        super().__post_init__()
+
+
+# ---------------------------------------------------------------------------
+# Phase 4 — Kanban dispatcher
+# ---------------------------------------------------------------------------
+
+
+@dataclass(kw_only=True)
+class HermesKanbanDispatcherScript(BaseJobScript):
+    """Run the Hermes kanban dispatcher daemon in a het-group.
+
+    Used in place of ``HermesAgentHeadScript`` for manifest entries with
+    ``kind: dispatcher``.  The dispatcher has no LLM dependency — it
+    just polls the shared kanban DB and routes new tasks to workers via
+    Hermes's built-in kanban tools.  We launch it via the hermes-agent
+    CLI so future changes to the daemon (locking, log fan-out, etc.)
+    arrive without pipeline edits.
+
+    Attributes:
+        agent_home: HERMES_HOME for the dispatcher (already populated by
+            HermesHomeBootstrapScript, including the kanban.db symlink
+            when ``shared_kanban_db`` is set).
+        agent_name: Logical name (used only for log prefix / readability).
+        log_prefix: SLURM log filename prefix.
+    """
+
+    agent_home: str
+    agent_name: str
+    log_prefix: str = field(default="hermes_kanban_dispatcher", init=False)
+    span_group_nodes: bool = False  # dispatcher is a single CPU process
+
+    def __post_init__(self):
+        agent_home_q = shlex.quote(self.agent_home)
+        cmd = f"""set -euo pipefail
+echo "=== Hermes kanban dispatcher: {self.agent_name} ==="
+export HERMES_HOME={agent_home_q}
+
+# Make sure the kanban plugin is enabled in this HERMES_HOME before the
+# dispatcher tries to attach to its tables — enabling is idempotent.
+hermes plugins enable kanban
+exec hermes kanban dispatcher run
 """
         self.set_inline(cmd)
         super().__post_init__()

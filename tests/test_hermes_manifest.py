@@ -323,3 +323,120 @@ def test_parse_rejects_non_mapping_source() -> None:
 def test_parse_rejects_empty_agents() -> None:
     with pytest.raises(ValueError, match="non-empty mapping"):
         parse_manifest({"agents": {}})
+
+
+# ---------------------------------------------------------------------------
+# Phase 4 — Kanban dispatcher manifest hooks
+# ---------------------------------------------------------------------------
+
+
+def test_t41_manifest_dispatcher_entry(tmp_path: Path) -> None:
+    """A dispatcher entry produces a het-group with no LLM GPU allocation."""
+    m = parse_manifest(
+        _write(
+            tmp_path,
+            {
+                "shared_kanban_db": "/lustre/kanban.db",
+                "agents": {
+                    "orch": {"model": "/m/o", "role": "orchestrator", "server_gpus": 8},
+                    "w1": {"model_share": "orch"},
+                    "w2": {"model_share": "orch"},
+                    "w3": {"model_share": "orch"},
+                    "kdisp": {"kind": "dispatcher", "dispatcher_cpus": 4},
+                },
+            },
+        )
+    )
+    assert m.shared_kanban_db == "/lustre/kanban.db"
+    assert m.by_name["kdisp"].kind == "dispatcher"
+    assert m.by_name["kdisp"].dispatcher_cpus == 4
+
+    groups = build_server_groups(m)
+    # Two groups: orchestrator (g0, with 8 GPUs + 3 co-located workers) and dispatcher (g1, 0 GPUs).
+    assert len(groups) == 2
+    assert groups[0].het_group == 0
+    assert groups[0].owner.name == "orch"
+    assert not groups[0].is_dispatcher
+    assert groups[0].server_gpus == 8
+    assert {a.name for a in groups[0].agents} == {"orch", "w1", "w2", "w3"}
+
+    assert groups[1].het_group == 1
+    assert groups[1].is_dispatcher
+    assert groups[1].server_gpus == 0
+    assert [a.name for a in groups[1].agents] == ["kdisp"]
+
+
+def test_dispatcher_cannot_be_orchestrator(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="dispatcher cannot also be the orchestrator"):
+        parse_manifest(
+            _write(
+                tmp_path,
+                {
+                    "agents": {
+                        "orch": {"model": "/m/o"},
+                        "kdisp": {"kind": "dispatcher", "role": "orchestrator"},
+                    }
+                },
+            )
+        )
+
+
+def test_dispatcher_rejects_model_keys(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="kind=dispatcher must not declare 'model'"):
+        parse_manifest(
+            _write(
+                tmp_path,
+                {
+                    "agents": {
+                        "orch": {"model": "/m/o"},
+                        "kdisp": {"kind": "dispatcher", "model": "/m/nope"},
+                    }
+                },
+            )
+        )
+
+
+def test_dispatcher_rejects_workers_list(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="dispatcher cannot declare 'workers'"):
+        parse_manifest(
+            _write(
+                tmp_path,
+                {
+                    "agents": {
+                        "orch": {"model": "/m/o"},
+                        "kdisp": {"kind": "dispatcher", "workers": ["orch"]},
+                    }
+                },
+            )
+        )
+
+
+def test_dispatcher_only_manifest_is_rejected(tmp_path: Path) -> None:
+    """A manifest with only dispatcher entries has no agent to orchestrate."""
+    with pytest.raises(ValueError, match="no kind=agent entries"):
+        parse_manifest(
+            _write(
+                tmp_path,
+                {
+                    "agents": {
+                        "k1": {"kind": "dispatcher"},
+                        "k2": {"kind": "dispatcher"},
+                    }
+                },
+            )
+        )
+
+
+def test_unknown_kind_rejected(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="unknown kind="):
+        parse_manifest(
+            _write(
+                tmp_path,
+                {
+                    "agents": {
+                        "orch": {"model": "/m/o"},
+                        "weird": {"kind": "scribe", "model": "/m/w"},
+                    }
+                },
+            )
+        )

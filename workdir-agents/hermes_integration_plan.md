@@ -499,30 +499,164 @@ through to `pytest.skip` if NeMo-Gym is not on `sys.path`.
 
 ---
 
-## Phase 4 — Kanban entry points (deferred; design-only here)
+## Phase 4 — Kanban entry points
 
-To avoid future churn, Phase 1 already supports these two extensions cleanly:
+**Status:** delivered.  ~10 new test cases pass (see below); Phases 0–3
+regression-free (57 NeMo-Gym + 60 NeMo-Skills hermes-related cases).
 
-1. **Shared kanban DB mount.** Manifest may declare `shared_kanban_db: <path>`; if present, the bootstrap script symlinks it into each agent's `HERMES_HOME/kanban.db`. Each agent's `enabled_toolsets` may include `kanban_*` tools.
-2. **Dispatcher het-group.** Manifest may declare an `agents:` entry with `kind: dispatcher` and no model — the pipeline launches `hermes plugins enable kanban && hermes kanban dispatcher run` in that het-group instead of a `hermes_agent` server.
+**Repo:** `NeMo-Skills`
+**Files changed:**
+- `nemo_skills/pipeline/utils/hermes_manifest.py` — `HermesAgentSpec.kind`
+  (``"agent" | "dispatcher"``), `dispatcher_cpus`, `dispatcher_mem_gb`;
+  `HermesFleetManifest.shared_kanban_db`; new `ServerGroup.is_dispatcher`
+  property; `build_server_groups` allocates a fresh het-group per
+  dispatcher (no model dedup); strict validation rejects
+  ``kind=dispatcher`` entries that also set ``model``, ``role:
+  orchestrator``, or ``workers:``.
+- `nemo_skills/pipeline/utils/scripts/hermes_agent.py` — bootstrap script
+  symlinks `<agent_home>/kanban.db` → `shared_kanban_db` when set
+  (creating the parent dir and touching the target file so the link is
+  immediately valid); new ``HermesKanbanDispatcherScript`` runs
+  ``hermes plugins enable kanban && exec hermes kanban dispatcher run``.
+- `nemo_skills/pipeline/hermes_agent_rollouts.py` — branches on
+  ``group.is_dispatcher``: no LLM server, no sandbox, no head, no
+  rollouts, HardwareConfig with ``num_gpus=0`` and ``num_tasks=1``;
+  ``peer_agents`` map excludes dispatcher entries; merge-back skips
+  dispatcher HERMES_HOMEs.
+- `nemo_skills/pipeline/utils/scripts/__init__.py` — re-exports the new
+  dispatcher script.
 
-No code in Phase 4 beyond enabling these flags in the manifest parser and a docs page.
+### Manifest extensions
 
-### Tests (Phase 4)
-- **T4.1** `test_manifest_dispatcher_entry` — manifest with one dispatcher and three workers produces a het-group plan with a dispatcher command; no LLM server allocated for the dispatcher.
-- **T4.2** `test_kanban_db_symlinked` — bootstrap places `kanban.db` symlinked to the shared path.
+```yaml
+shared_kanban_db: /lustre/.../kanban.db
+agents:
+  orch:
+    model: /m/orch
+    server_gpus: 8
+  worker1:
+    model_share: orch
+    hermes:
+      enabled_toolsets: [terminal, file, kanban_*]
+  kdisp:
+    kind: dispatcher
+    dispatcher_cpus: 4
+    dispatcher_mem_gb: 16
+```
+
+### Tests
+- **T4.1** `test_t41_manifest_dispatcher_entry` — dispatcher manifest
+  produces a het-group plan with no LLM server allocation
+  (``group.server_gpus == 0`` for the dispatcher group).
+- **T4.2** `test_t42_bootstrap_symlinks_shared_kanban_db` — when
+  ``shared_kanban_db`` is set, the bootstrap script materialises
+  ``<agent_home>/kanban.db`` as a symlink to the shared path.  Companion
+  case verifies the symlink is absent when the field is unset.
+- Plus pipeline-level cases: dispatcher excluded from orchestrator's
+  peer map, mergeback skips dispatcher HERMES_HOMEs, dispatcher script
+  emits the expected hermes-CLI two-liner, and parser rejects bad
+  dispatcher specs (model set, orchestrator role, workers list, all-
+  dispatcher manifest, unknown kind).
+
+**Exit criteria:** all Phase 4 cases pass; Phase 1 + 2 + 3 tests
+regression-free.  Cluster smoke (kanban DB shared between dispatcher and
+orchestrator, dispatcher routes tasks back to a worker via its kanban
+tools) is deferred until cluster access — rolled into the existing
+Phase-1/2/3 cluster-smoke ticket.
 
 ---
 
-## Phase 5 — RL preparation (no code in this plan, but locked-in design)
+## Phase 5 — RL preparation
 
-- The Phase-3 trace already carries `prompt_token_ids` / `generation_token_ids` / `generation_log_probs` per step per agent, with `agent_name` and `model` attribution.
-- `trajectory_compressor.py` from hermes-agent (already vendored via the pinned commit) consumes per-agent JSONL traces.
-- Per-agent reward attribution: defer the choice between (a) propagating orchestrator's terminal reward and (b) per-worker judge until after a baseline run is in hand.
+**Status:** delivered (minimal surface, leaving per-worker judge wiring
+for later).  4 new tests pass.
 
-### Tests (Phase 5; written when we get there)
-- **T5.1** `test_per_agent_trajectory_export` — given a multi-agent rollout, produce one trajectory JSONL per agent with token IDs and at least one reward field.
-- **T5.2** `test_trajectory_compressor_handles_multi_agent_input` — feed a per-agent JSONL into the compressor and verify it doesn't crash on the new shape.
+**Repo:** `NeMo-Skills`
+**Files added:**
+- `nemo_skills/scripts/export_hermes_trajectories.py` — walks
+  ``<output_dir>/traces/**/*.jsonl``, buckets events by
+  ``(agent, session_id)``, builds a ShareGPT-style ``conversations``
+  list per session, lifts ``prompt_token_ids`` /
+  ``generation_token_ids`` / ``generation_log_probs`` out of ``step``
+  events into a ``token_ids`` sub-object, and propagates the
+  orchestrator's terminal reward (from ``rollouts.jsonl``) to its
+  workers via the ``ticket_id ↔ session_id`` join key Phase 3 set up.
+  Per-worker judges are intentionally deferred — easy to swap in later
+  by changing the reward-resolution step without touching the schema.
+- `tests/observability/test_trajectory_export.py` — 4 cases.
+
+### Reward attribution model
+
+The exporter implements design choice **(a)** from the original plan —
+the orchestrator's reward propagates to all its workers:
+
+* Orchestrator sessions are ordered by their first event's timestamp;
+  reward[k] = rollouts[task_index=k].
+* Worker session_id equals the dispatch ticket_id.  Each delegation
+  event in ``delegations.jsonl`` carries the ticket_id and a timestamp;
+  we attach the delegation to the temporally-nearest orchestrator
+  session, then forward that session's reward to the worker.
+
+This is the simplest faithful join given Phase 3's data; replacing it
+with per-worker reward judges is a localized change to
+``_load_rollouts`` / ``export_trajectories`` and does not touch the
+trace schema or the trajectory format.
+
+### ShareGPT export shape
+
+One JSON line per session:
+
+```json
+{
+  "agent": "orchestrator",
+  "session_id": "task_42",
+  "model": "Nemotron-3-Nano-30B",
+  "conversations": [
+    {"from": "human", "value": "solve task X"},
+    {"from": "gpt",   "value": "I'll delegate to analyst."},
+    {"from": "tool",  "value": "{\"tool_name\": \"calculator\", \"result\": \"42\"}"},
+    {"from": "gpt",   "value": "result: 42"}
+  ],
+  "reward": 1.0,
+  "token_ids": {
+    "prompt_token_ids":      [[101, 102, 103]],
+    "generation_token_ids":  [[201, 202]],
+    "generation_log_probs":  [[-0.1, -0.2]]
+  }
+}
+```
+
+``token_ids`` is omitted entirely when no step event carried RL tensors,
+so non-RL runs don't pay the storage cost.
+
+### Tests
+- **T5.1** `test_t51_per_agent_trajectory_export` — synthesizes a
+  two-agent run (orchestrator + analyst with one delegation), runs the
+  exporter, verifies each agent's trajectory file has the ShareGPT
+  shape, the orchestrator's reward propagated to the analyst, and the
+  ``token_ids`` sub-object survived end-to-end.
+- **T5.1.b** `test_t51_no_rollouts_means_reward_none` — without a
+  rollouts file, trajectories still export with ``reward: null``.
+- **T5.1.c** `test_build_trajectory_skips_unknown_kinds` — unknown
+  event kinds are dropped from ``conversations`` (forward-compat with
+  future Hermes callbacks).
+- **T5.2** `test_t52_trajectory_compressor_handles_export` — feeds an
+  exported trajectory's ``conversations`` list into
+  ``trajectory_compressor.TrajectoryCompressor._find_protected_indices``
+  (the schema-validation entry point), confirms the compressor
+  recognises our role tags ({system, human, gpt, tool}) and returns a
+  non-empty ``protected`` set.  We exercise the pure code path rather
+  than instantiating ``TrajectoryCompressor`` because the constructor
+  reaches out to OpenRouter / HF — out of scope for unit tests.
+
+**Exit criteria:**
+- [x] T5.* pass under the project's miniconda env.
+- [x] Existing Phase 3 step events carry token IDs without exporter
+      involvement (verified by T3.4 + T5.1 together).
+- [ ] A real multi-agent rollout produces an exporter output the
+      trajectory_compressor instance can fully process (i.e. with
+      provider creds + tokenizer available) — deferred to cluster
+      smoke alongside Phases 1/2/3/4.
 
 ---
 
@@ -563,8 +697,17 @@ No code in Phase 4 beyond enabling these flags in the manifest parser and a docs
   - [x] NeMo-Gym `peer_agents` plugin delegation events (Hermes-side)
   - [x] `trace_writer.step_callback` forwards token-id kwargs
   - [x] `tests/observability/test_fleet_trace.py` (7 cases incl. T3.1–T3.5)
-- [ ] Phase 4 — Kanban hooks: manifest extension + symlink (no logic changes elsewhere)
-- [ ] Phase 5 — RL surface: deferred
+- [x] Phase 4 — Kanban hooks:
+  - [x] manifest schema: `kind: dispatcher`, `shared_kanban_db`,
+        `dispatcher_cpus/mem_gb`
+  - [x] bootstrap symlink to shared kanban DB
+  - [x] `HermesKanbanDispatcherScript` and `_build_jobs` dispatcher branch
+  - [x] pipeline-level dispatcher tests (peer-exclusion, mergeback skip,
+        hardware shape)
+- [x] Phase 5 — RL surface:
+  - [x] `nemo_skills/scripts/export_hermes_trajectories.py`
+  - [x] `tests/observability/test_trajectory_export.py`
+  - [ ] cluster-smoke: full trajectory_compressor run (deferred)
 
 ## How to verify progressively
 

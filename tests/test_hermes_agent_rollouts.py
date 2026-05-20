@@ -39,6 +39,7 @@ from nemo_skills.pipeline.utils.scripts.hermes_agent import (
     HermesAgentHeadScript,
     HermesHomeBootstrapScript,
     HermesHomeMergebackScript,
+    HermesKanbanDispatcherScript,
 )
 
 
@@ -522,6 +523,216 @@ def test_pipeline_rejects_missing_gym_container() -> None:
 # ---------------------------------------------------------------------------
 # T1.9 — existing ns nemo_gym_rollouts is untouched.
 # ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# Phase 4 — Kanban dispatcher hooks
+# ---------------------------------------------------------------------------
+
+
+def test_t42_bootstrap_symlinks_shared_kanban_db(tmp_path: Path) -> None:
+    """When shared_kanban_db is set, bootstrap creates a symlink to it."""
+    template = _make_fake_template(tmp_path)
+    agent_home = tmp_path / "agents" / "kdisp" / "hermes_home"
+    shared_db = tmp_path / "shared" / "kanban.db"
+
+    script = HermesHomeBootstrapScript(
+        template_path=str(template),
+        agent_home=str(agent_home),
+        overlay={"agent_name": "kdisp"},
+        shared_kanban_db=str(shared_db),
+    )
+    _run_inline_script(script)
+
+    link_path = agent_home / "kanban.db"
+    assert link_path.is_symlink(), f"{link_path} is not a symlink"
+    assert os.readlink(link_path) == str(shared_db)
+    # The shared DB file itself was touched (so the symlink target exists),
+    # but its parent dir was also created.
+    assert shared_db.exists()
+    assert shared_db.parent.is_dir()
+
+
+def test_t42_bootstrap_no_symlink_when_kanban_not_set(tmp_path: Path) -> None:
+    """Default (no shared_kanban_db) leaves no kanban.db artifact behind."""
+    template = _make_fake_template(tmp_path)
+    agent_home = tmp_path / "agents" / "orch" / "hermes_home"
+
+    script = HermesHomeBootstrapScript(
+        template_path=str(template),
+        agent_home=str(agent_home),
+        overlay={"agent_name": "orch"},
+    )
+    _run_inline_script(script)
+
+    assert not (agent_home / "kanban.db").exists()
+
+
+def test_pipeline_with_dispatcher_builds_two_groups() -> None:
+    """A manifest with one dispatcher and one orchestrator yields two
+    CommandGroups: g0 = orchestrator (LLM server + bootstrap + head +
+    rollouts), g1 = dispatcher (no LLM server, just bootstrap +
+    dispatcher cmd)."""
+    manifest = parse_manifest(
+        {
+            "shared_kanban_db": "/lustre/kanban.db",
+            "agents": {
+                "orch": {"model": "/m/orch", "server_gpus": 8},
+                "kdisp": {"kind": "dispatcher"},
+            },
+        }
+    )
+    jobs = _build_jobs(
+        manifest=manifest,
+        cluster_config=_minimal_cluster_config(),
+        output_dir="/results",
+        log_dir="/results/logs",
+        input_file="/data/in.jsonl",
+        template_path="/tmpl",
+        server_container_override=None,
+        gym_container="nemo-gym",
+        gym_path=None,
+        with_sandbox=False,
+        sandbox_container_override=None,
+        sandbox_mounts=None,
+        sbatch_kwargs={},
+        partition=None,
+        qos=None,
+        time_min=None,
+        merge_back=False,
+        merge_dry_run=False,
+        extra_arguments="",
+        policy_api_key="dummy",  # pragma: allowlist secret
+        policy_model_name=None,
+        expname="kdtest",
+    )
+    job = jobs[0]
+    groups = job.get("groups") or [job["group"]]
+    assert len(groups) == 2
+
+    orch_group, disp_group = groups
+    orch_names = [c.name for c in orch_group.commands]
+    disp_names = [c.name for c in disp_group.commands]
+
+    # Orchestrator group: LLM server + bootstrap + head + rollouts.
+    assert any(n.endswith("_g0_server") for n in orch_names)
+    assert "kdtest_orch_bootstrap" in orch_names
+    assert "kdtest_orch_head" in orch_names
+    assert "kdtest_orch_rollouts" in orch_names
+
+    # Dispatcher group: NO LLM server, NO sandbox, NO head — only bootstrap + dispatcher.
+    assert not any(n.endswith("_server") for n in disp_names)
+    assert not any(n.endswith("_sandbox") for n in disp_names)
+    assert not any(n.endswith("_head") for n in disp_names)
+    assert "kdtest_kdisp_bootstrap" in disp_names
+    assert "kdtest_kdisp_dispatcher" in disp_names
+
+    # Dispatcher group's HardwareConfig must have zero GPUs.
+    assert disp_group.hardware.num_gpus == 0
+    assert disp_group.hardware.num_tasks == 1
+
+    # Every bootstrap (orch + dispatcher) carries the shared kanban path so
+    # both ends agree on the same DB file.
+    for grp in groups:
+        for cmd in grp.commands:
+            if isinstance(cmd.script, HermesHomeBootstrapScript):
+                assert cmd.script.shared_kanban_db == "/lustre/kanban.db"
+
+    # The dispatcher command runs the kanban CLI.
+    disp_cmds = [c for c in disp_group.commands if isinstance(c.script, HermesKanbanDispatcherScript)]
+    assert len(disp_cmds) == 1
+    inline = disp_cmds[0].script.inline
+    assert isinstance(inline, str)
+    assert "hermes plugins enable kanban" in inline
+    assert "hermes kanban dispatcher run" in inline
+
+
+def test_pipeline_dispatcher_excluded_from_orchestrator_peers() -> None:
+    """The orchestrator's peer_agents map must not include the dispatcher."""
+    manifest = parse_manifest(
+        {
+            "agents": {
+                "orch": {"model": "/m/orch", "server_gpus": 8},
+                "analyst": {"model_share": "orch"},
+                "kdisp": {"kind": "dispatcher"},
+            }
+        }
+    )
+    jobs = _build_jobs(
+        manifest=manifest,
+        cluster_config=_minimal_cluster_config(),
+        output_dir="/results",
+        log_dir="/results/logs",
+        input_file="/data/in.jsonl",
+        template_path="/tmpl",
+        server_container_override=None,
+        gym_container="nemo-gym",
+        gym_path=None,
+        with_sandbox=False,
+        sandbox_container_override=None,
+        sandbox_mounts=None,
+        sbatch_kwargs={},
+        partition=None,
+        qos=None,
+        time_min=None,
+        merge_back=False,
+        merge_dry_run=False,
+        extra_arguments="",
+        policy_api_key="dummy",  # pragma: allowlist secret
+        policy_model_name=None,
+        expname="peers",
+    )
+    overlays = _collect_bootstrap_overlays(jobs[0].get("groups") or [jobs[0]["group"]])
+    orch_peers = overlays["orch"].get("peer_agents", {})
+    assert "analyst" in orch_peers
+    assert "kdisp" not in orch_peers
+
+
+def test_pipeline_mergeback_skips_dispatcher_homes() -> None:
+    """The mergeback step must not crawl the dispatcher's HERMES_HOME."""
+    manifest = parse_manifest(
+        {
+            "agents": {
+                "orch": {"model": "/m/orch", "server_gpus": 8},
+                "kdisp": {"kind": "dispatcher"},
+            }
+        }
+    )
+    jobs = _build_jobs(
+        manifest=manifest,
+        cluster_config=_minimal_cluster_config(),
+        output_dir="/results",
+        log_dir="/results/logs",
+        input_file="/data/in.jsonl",
+        template_path="/tmpl",
+        server_container_override=None,
+        gym_container="nemo-gym",
+        gym_path=None,
+        with_sandbox=False,
+        sandbox_container_override=None,
+        sandbox_mounts=None,
+        sbatch_kwargs={},
+        partition=None,
+        qos=None,
+        time_min=None,
+        merge_back=True,
+        merge_dry_run=False,
+        extra_arguments="",
+        policy_api_key="dummy",  # pragma: allowlist secret
+        policy_model_name=None,
+        expname="mb",
+    )
+    groups = jobs[0].get("groups") or [jobs[0]["group"]]
+    mergeback_scripts = [
+        c.script
+        for g in groups
+        for c in g.commands
+        if isinstance(c.script, HermesHomeMergebackScript)
+    ]
+    assert len(mergeback_scripts) == 1
+    sources = mergeback_scripts[0].sources
+    assert any("orch" in s for s in sources)
+    assert not any("kdisp" in s for s in sources), sources
 
 
 def test_t19_existing_nemo_gym_rollouts_command_still_importable() -> None:

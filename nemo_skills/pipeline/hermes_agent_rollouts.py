@@ -58,6 +58,7 @@ from nemo_skills.pipeline.utils.scripts import (
     HermesAgentHeadScript,
     HermesHomeBootstrapScript,
     HermesHomeMergebackScript,
+    HermesKanbanDispatcherScript,
     NemoGymRolloutsScript,
     SandboxScript,
     ServerScript,
@@ -183,9 +184,14 @@ def _build_jobs(
 ) -> List[Dict[str, Any]]:
     """Build the het-job spec; returns ``jobs=[...]`` for ``Pipeline``."""
     groups = build_server_groups(manifest)
-    # Pre-allocate one agent port per agent (random free ports on submit
-    # host; the agents bind 0.0.0.0:<port> inside their het-group node).
-    agent_ports: Dict[str, int] = {a.name: get_free_port(strategy="random") for a in manifest.agents}
+    # Pre-allocate one agent port per kind=agent entry (random free ports
+    # on submit host; the agents bind 0.0.0.0:<port> inside their het-group
+    # node).  Dispatchers run no HTTP endpoint so they're skipped.
+    agent_ports: Dict[str, int] = {
+        a.name: get_free_port(strategy="random")
+        for a in manifest.agents
+        if a.kind == "agent"
+    }
 
     # Per-agent home dir (job-local under output_dir).
     def home_for(name: str) -> str:
@@ -208,10 +214,24 @@ def _build_jobs(
     orchestrator_group = next(g for g in groups if g.owner.name == orchestrator.name)
 
     peer_agents_for_orch: Dict[str, Dict[str, Any]] = {}
-    declared_workers = orchestrator.workers or [a.name for a in manifest.agents if a.name != orchestrator.name]
+    # Default worker list: every other kind=agent entry.  Dispatchers are
+    # excluded because they expose no /task endpoint (their interface is
+    # the kanban DB).
+    declared_workers = orchestrator.workers or [
+        a.name for a in manifest.agents
+        if a.name != orchestrator.name and a.kind == "agent"
+    ]
     for worker_name in declared_workers:
         if worker_name == orchestrator.name:
             continue
+        worker_spec = manifest.by_name.get(worker_name)
+        if worker_spec is None:
+            raise ValueError(f"orchestrator references unknown worker {worker_name!r}")
+        if worker_spec.kind != "agent":
+            raise ValueError(
+                f"orchestrator worker {worker_name!r} has kind={worker_spec.kind!r}; "
+                f"only kind=agent peers can host /task endpoints"
+            )
         # Find which het-group hosts this worker.
         for g in groups:
             if any(a.name == worker_name for a in g.agents):
@@ -220,8 +240,6 @@ def _build_jobs(
                     "port": agent_ports[worker_name],
                 }
                 break
-        else:
-            raise ValueError(f"orchestrator references unknown worker {worker_name!r}")
 
     # ------------------------------------------------------------------
     # Build a CommandGroup per het-group
@@ -231,73 +249,102 @@ def _build_jobs(
     sandbox_script_for_group: List[Optional[SandboxScript]] = []
 
     for group in groups:
-        # 1. LLM server for this group.
-        server_type = group.server_type
-        server_container = server_container_override or containers.get(server_type)
-        if server_container is None:
-            raise ValueError(
-                f"cluster_config['containers'] has no entry for server type {server_type!r} "
-                f"(group {group.het_group}); set --server_container or extend the config."
-            )
-
-        server_script = ServerScript(
-            server_type=server_type,
-            model_path=group.model,
-            cluster_config=cluster_config,
-            num_gpus=group.server_gpus,
-            num_nodes=group.server_nodes,
-            server_args=group.server_args,
-            allocate_port=True,
-        )
-        server_script_for_group.append(server_script)
-
-        commands: List[Command] = [
-            Command(
-                script=server_script,
-                container=server_container,
-                name=f"{expname}_g{group.het_group}_server",
-            )
-        ]
-
-        # 2. Sandbox per group (workers in non-orchestrator groups need their
-        # own sandbox because they're on a different node).
+        commands: List[Command] = []
+        server_script: Optional[ServerScript] = None
         sandbox_script: Optional[SandboxScript] = None
-        if with_sandbox:
-            sandbox_script = SandboxScript(
+
+        if not group.is_dispatcher:
+            # 1. LLM server for this group.
+            server_type = group.server_type
+            server_container = server_container_override or containers.get(server_type)
+            if server_container is None:
+                raise ValueError(
+                    f"cluster_config['containers'] has no entry for server type {server_type!r} "
+                    f"(group {group.het_group}); set --server_container or extend the config."
+                )
+            server_script = ServerScript(
+                server_type=server_type,
+                model_path=group.model,
                 cluster_config=cluster_config,
+                num_gpus=group.server_gpus,
+                num_nodes=group.server_nodes,
+                server_args=group.server_args,
                 allocate_port=True,
             )
             commands.append(
                 Command(
-                    script=sandbox_script,
-                    container=sandbox_container,
-                    name=f"{expname}_g{group.het_group}_sandbox",
-                    mounts=sandbox_mounts,
+                    script=server_script,
+                    container=server_container,
+                    name=f"{expname}_g{group.het_group}_server",
                 )
             )
+
+            # 2. Sandbox per non-dispatcher group (workers in non-orchestrator
+            # groups need their own sandbox because they're on a different node).
+            if with_sandbox:
+                sandbox_script = SandboxScript(
+                    cluster_config=cluster_config,
+                    allocate_port=True,
+                )
+                commands.append(
+                    Command(
+                        script=sandbox_script,
+                        container=sandbox_container,
+                        name=f"{expname}_g{group.het_group}_sandbox",
+                        mounts=sandbox_mounts,
+                    )
+                )
+
+        server_script_for_group.append(server_script)  # type: ignore[arg-type]
         sandbox_script_for_group.append(sandbox_script)
 
-        # 3. Per-agent bootstrap + head server.
+        # 3. Per-agent bootstrap + head/dispatcher process.
         for agent in group.agents:
             is_orch = agent.name == orchestrator.name
-            overlay = _build_overlay(
-                agent,
-                is_orchestrator=is_orch,
-                trace_dir=trace_dir_for(agent.name),
-                peer_agents=peer_agents_for_orch if is_orch else None,
-                sandbox_inside_container=with_sandbox,
-            )
+            is_dispatcher = agent.kind == "dispatcher"
+            # Dispatchers don't emit traces or accept peer calls — keep
+            # the overlay minimal so the dispatcher process doesn't try to
+            # mount HermesAgentConfig at startup.
+            if is_dispatcher:
+                overlay: Dict[str, Any] = {
+                    "agent_name": agent.name,
+                    # The kanban toolset is enabled at runtime by the
+                    # dispatcher script — but echoing it here keeps the
+                    # overlay self-describing for human readers.
+                    "enabled_toolsets": list(agent.hermes.get("enabled_toolsets", ["kanban"])),
+                }
+            else:
+                overlay = _build_overlay(
+                    agent,
+                    is_orchestrator=is_orch,
+                    trace_dir=trace_dir_for(agent.name),
+                    peer_agents=peer_agents_for_orch if is_orch else None,
+                    sandbox_inside_container=with_sandbox,
+                )
             commands.append(
                 Command(
                     script=HermesHomeBootstrapScript(
                         template_path=template_path,
                         agent_home=home_for(agent.name),
                         overlay=overlay,
+                        shared_kanban_db=manifest.shared_kanban_db,
                     ),
                     container=gym_container,
                     name=f"{expname}_{agent.name}_bootstrap",
                 )
             )
+            if is_dispatcher:
+                commands.append(
+                    Command(
+                        script=HermesKanbanDispatcherScript(
+                            agent_home=home_for(agent.name),
+                            agent_name=agent.name,
+                        ),
+                        container=gym_container,
+                        name=f"{expname}_{agent.name}_dispatcher",
+                    )
+                )
+                continue
             commands.append(
                 Command(
                     script=HermesAgentHeadScript(
@@ -348,10 +395,13 @@ def _build_jobs(
                 )
             )
             if merge_back:
+                # Dispatchers don't author curated content; their HERMES_HOME
+                # is just a launch shell.  Skip them from merge-back sources.
+                merge_sources = [home_for(a.name) for a in manifest.agents if a.kind == "agent"]
                 commands.append(
                     Command(
                         script=HermesHomeMergebackScript(
-                            sources=[home_for(a.name) for a in manifest.agents],
+                            sources=merge_sources,
                             template_path=template_path,
                             audit_path=f"{output_dir}/merge_audit.json",
                             dry_run=merge_dry_run,
@@ -362,13 +412,24 @@ def _build_jobs(
                 )
 
         # 5. HardwareConfig for this group.
-        hardware = HardwareConfig(
-            partition=partition,
-            num_gpus=group.server_gpus,
-            num_nodes=group.server_nodes,
-            num_tasks=server_script.num_tasks,
-            sbatch_kwargs=sbatch_kwargs,
-        )
+        if group.is_dispatcher:
+            # Dispatcher het-group: no GPUs, single CPU task.  ``num_tasks=1``
+            # mirrors how a plain CPU-only NeMo-Run job is sized.
+            hardware = HardwareConfig(
+                partition=partition,
+                num_gpus=0,
+                num_nodes=1,
+                num_tasks=1,
+                sbatch_kwargs=sbatch_kwargs,
+            )
+        else:
+            hardware = HardwareConfig(
+                partition=partition,
+                num_gpus=group.server_gpus,
+                num_nodes=group.server_nodes,
+                num_tasks=server_script.num_tasks,  # type: ignore[union-attr]
+                sbatch_kwargs=sbatch_kwargs,
+            )
         command_groups.append(
             CommandGroup(
                 commands=commands,
