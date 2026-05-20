@@ -45,7 +45,7 @@ Key reads:
 
 | Cluster | Model path | vLLM container | GPUs | Notes |
 |---|---|---|---|---|
-| `aws-cmh` | `/hf_models/Kimi-K2.6` | `vllm-glm51-cu130-ray.sqsh` (mirror Oleksii's) | 2 nodes × 4 GPUs (TP=8 + EP) | Kimi expects `thinking=false` not `enable_thinking`; the manifest sets this via the Phase-6 `chat_template_kwargs` knob. |
+| `aws-cmh` | `/hf_models/Kimi-K2.6` | `vllm-glm51-cu130-ray.sqsh` (mirror Oleksii's) | 1 node × 4 GPUs (TP=4 + EP) | One GB300 (4 × 288 GB HBM = 1152 GB) is enough; halves the SLURM footprint vs. Oleksii's 2-node setup.  Kimi expects `thinking=false` not `enable_thinking`; the manifest sets this via the Phase-6 `chat_template_kwargs` knob. |
 
 Before submitting on AWS-CMH, mirror the Kimi-compatible vLLM container
 into your alaptev mount and update `cluster_configs/aws-cmh.yaml`:

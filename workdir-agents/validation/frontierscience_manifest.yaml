@@ -29,12 +29,16 @@ agents:
     role: orchestrator
     model: /hf_models/Kimi-K2.6
     server_type: vllm
-    server_gpus: 4              # GB300 4 GPUs/node
-    server_nodes: 2             # tensor-parallel 8 across both nodes
+    # One GB300 node (4 GPUs × 288 GB HBM = 1152 GB) is enough for
+    # Kimi-K2.6 — TP=4 with --enable-expert-parallel.  No multi-node
+    # NCCL coordination, no Ray cross-node, faster startup, and the
+    # whole job fits well inside the 4h aws-cmh walltime.
+    server_gpus: 4
+    server_nodes: 1
     server_args: >-
       --enable-expert-parallel
       --distributed-executor-backend=ray
-      --tensor-parallel-size 8
+      --tensor-parallel-size 4
       --compilation-config '{"pass_config": {"fuse_allreduce_rms": false}}'
       --max-model-len 131072
       --trust-remote-code
