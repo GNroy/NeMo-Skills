@@ -89,9 +89,64 @@ def convert_entry(ng_entry: Dict[str, Any], seed_tag: Optional[str] = None) -> D
     return out
 
 
+def _last_user_message(rcp: Dict[str, Any]) -> str:
+    """Extract the last user-role message from a responses_create_params dict."""
+    if not isinstance(rcp, dict):
+        return ""
+    for msg in reversed(rcp.get("input") or []):
+        if isinstance(msg, dict) and msg.get("role") == "user":
+            return str(msg.get("content") or "")
+    return ""
+
+
+def _load_materialized_metadata(path: Path) -> Dict[str, Dict[str, Any]]:
+    """Read ``rollouts_materialized_inputs.jsonl`` keyed by the last user message.
+
+    The passthrough verifier's ``BaseVerifyResponse`` schema doesn't
+    carry ``verifier_metadata`` through, so ``rollouts.jsonl`` ends up
+    with empty meta even when the input had it.  NeMo-Gym writes a
+    sibling ``rollouts_materialized_inputs.jsonl`` that *does* preserve
+    the input row verbatim.  But the two files are NOT row-aligned —
+    NeMo-Gym writes rollouts as workers complete, in async order, so we
+    must join by content rather than by position.  Keying by the last
+    user message of ``responses_create_params.input`` is exact (the
+    converter ``convert_ns_to_ng.py`` only ever emits one user turn per
+    row) and avoids fragile hashing.
+    """
+    out: Dict[str, Dict[str, Any]] = {}
+    if not path.is_file():
+        return out
+    with path.open("r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                entry = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            meta = entry.get("verifier_metadata")
+            if not isinstance(meta, dict):
+                continue
+            key = _last_user_message(entry.get("responses_create_params") or {})
+            if key:
+                out[key] = meta
+    return out
+
+
 def convert_file(input_path: Path, output_path: Path, seed_tag: Optional[str] = None) -> int:
+    """Convert a NG rollouts file to NS-judgeable JSONL.
+
+    Reads ``<input_path>`` and, when present, the sibling
+    ``rollouts_materialized_inputs.jsonl`` produced by NeMo-Gym in the
+    same directory.  The materialized inputs supply the
+    ``verifier_metadata`` (id, expected_answer, subset_for_metrics)
+    that ``BaseVerifyResponse`` strips — without that join the judge
+    has no ground truth to grade against.
+    """
     written = 0
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    meta_by_question = _load_materialized_metadata(input_path.parent / "rollouts_materialized_inputs.jsonl")
     with input_path.open("r", encoding="utf-8") as fin, output_path.open(
         "w", encoding="utf-8"
     ) as fout:
@@ -100,6 +155,16 @@ def convert_file(input_path: Path, output_path: Path, seed_tag: Optional[str] = 
             if not line:
                 continue
             ng_entry = json.loads(line)
+            # Restore verifier_metadata from materialized inputs when the
+            # rollouts entry doesn't already carry it (passthrough verifier).
+            # Use the user-message text as the join key — NeMo-Gym writes
+            # rollouts as workers complete (async), so positional joins
+            # silently mis-pair rollouts with the wrong metadata.
+            if not (ng_entry.get("verifier_metadata") or {}):
+                key = _last_user_message(ng_entry.get("responses_create_params") or {})
+                meta = meta_by_question.get(key)
+                if meta is not None:
+                    ng_entry["verifier_metadata"] = meta
             ns_entry = convert_entry(ng_entry, seed_tag=seed_tag)
             fout.write(json.dumps(ns_entry, ensure_ascii=False) + "\n")
             written += 1

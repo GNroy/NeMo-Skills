@@ -774,3 +774,39 @@ Each phase has a smoke command we should run before moving on.
 - Decide per-worker reward attribution before training (Phase 5).
 - Decide whether to make `ns hermes_agent_rollouts` a thin wrapper over `ns nemo_gym_rollouts` once the manifest support is generic enough to upstream into the latter.
 - Discuss with Hermes maintainers whether the `/task` adapter and trace callbacks belong in hermes-agent itself rather than in the NeMo-Gym wrapper.
+- **Plumb `HermesAgentConfig.temperature` through `_build_api_kwargs`**
+  (Phase-6 cluster-smoke follow-up).  The NousResearch hermes-agent
+  AIAgent constructor does not take a `temperature` kwarg — temperature
+  is per-model, per-request, gated by
+  `agent.auxiliary_client._fixed_temperature_for_model`:
+
+    | Model class      | Behavior                                                                 |
+    |------------------|--------------------------------------------------------------------------|
+    | Kimi / Moonshot  | Returns `OMIT_TEMPERATURE` — caller must `pop("temperature")` entirely   |
+    | Opus 4.7+        | Pinned to 1.0 (400s on any other value)                                  |
+    | Other models     | Returns the requested temperature, set per-request via `kwargs["temperature"]` |
+
+  For Kimi-K2.6 (Phase 6 smoke) the kwarg removal in `app.py` is
+  *semantically correct* — Kimi manages temperature server-side and any
+  client value is dropped.  But once we run other models against this
+  pipeline, the `temperature` field in `HermesAgentConfig` should
+  actually take effect.  The minimal change lives inside the existing
+  `_patched_build_api_kwargs` closure in `app.py`:
+
+  ```python
+  def _patched_build_api_kwargs(api_messages):
+      kw = _original_build_api_kwargs(api_messages)
+      from agent.auxiliary_client import _fixed_temperature_for_model, OMIT_TEMPERATURE
+
+      fixed = _fixed_temperature_for_model(model_name, self.config.temperature, base_url)
+      if fixed is OMIT_TEMPERATURE:
+          kw.pop("temperature", None)
+      elif fixed is not None:
+          kw["temperature"] = fixed
+      # ...existing chat_template_kwargs handling stays...
+      return kw
+  ```
+
+  Pair with a NeMo-Gym test that swaps the fake AIAgent for one that
+  records ``_build_api_kwargs`` output and asserts the temperature
+  policy matches the model name.

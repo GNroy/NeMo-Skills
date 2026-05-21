@@ -42,6 +42,8 @@ agents:
       --compilation-config '{"pass_config": {"fuse_allreduce_rms": false}}'
       --max-model-len 131072
       --trust-remote-code
+      --enable-auto-tool-choice
+      --tool-call-parser kimi_k2
     hermes:
       max_turns: 100            # frontier-science problems can need many tool turns
       # Hermes built-in toolsets we want active for science research.
@@ -71,6 +73,10 @@ agents:
       # ``enable_thinking`` — see HermesAgentConfig.chat_template_kwargs.
       chat_template_kwargs:
         thinking: false
+      # vllm-glm51-cu130-ray.sqsh rejects stream=True with HTTP 422.
+      # Hermes' default conversation loop streams for health-check
+      # granularity; flip this to True for the strict-non-stream backend.
+      disable_streaming: true
       # NS MCP servers exposed to Hermes.  Group A uses python -m for
       # native FastMCP entrypoints; group B uses ns-mcp-serve to wrap
       # in-process Tool classes.  See nemo_skills/mcp/servers/README.md.
