@@ -729,7 +729,102 @@ so non-RL runs don't pay the storage cost.
 
 ## Phase 6 — Validation experiment (frontierscience-olympiad)
 
-**Status:** scaffolding delivered locally, ready for cluster submit.
+**Status (2026-05-20 evening):** smoke succeeded.  Run 0 v7 (baseline,
+job `287434`) produced 5/5 correct answers on the hand-crafted smoke
+set with Kimi-K2.6 on aws-cmh.  Run 1 (learning, merge-back ON, job
+`288216`) was kicked off at session end; Run 2 + judges + comparator
+queued for the next session.  See "Phase 6 cluster-smoke field log"
+below for the 12 issues we found and fixed.
+
+### Phase 6 cluster-smoke field log (2026-05-20)
+
+Twelve concrete issues surfaced when going from "all tests green
+locally" to "actually runs on aws-cmh".  Numbered in the order they
+broke the pipeline; commit refs for the fixes:
+
+1. **NeMo-Run parallel CommandGroup kills all sruns on first finish.**
+   The bootstrap step exits in ~30 s and would torpedo server + sandbox
+   + rollouts.  Fix: `sleep infinity` after bootstrap work, gated on
+   `SLURM_JOB_ID` so local pytest still completes.
+   *NeMo-Skills `6e864b69`.*
+2. **No `rsync` inside `nemo-skills-*.sqsh`.**  Bootstrap previously
+   shelled out to rsync.  Fix: `shutil.copytree` via inline python3.
+   *NeMo-Skills `6e864b69`.*
+3. **Orchestrator had a redundant `HermesAgentHeadScript`.**
+   `NemoGymRolloutsScript` already starts its own `ng_run`; two would
+   conflict on the agent port.  Workers still get a head script
+   (`keep_alive=True`); only the orchestrator's is dropped.
+   *NeMo-Skills `6e864b69`.*
+4. **`ng_run` needed three NeMo-Gym configs composed** (passthrough +
+   hermes_agent + vllm_model) plus Hydra overrides
+   `resources_server.name=passthrough` and `hermes_home=<per-agent>`.
+   The bundled `hermes_agent.yaml` had `???` for `resources_server.name`.
+   *NeMo-Skills `6e864b69`.*
+5. **`from run_agent import AIAgent` couldn't resolve.**  hermes-agent
+   isn't pip-installable alongside NeMo-Gym (openai version pin
+   conflict — see #10 below).  Fix: `--hermes_agent_path` CLI flag,
+   prepended to PYTHONPATH inside both `HermesAgentHeadScript` and
+   `NemoGymRolloutsScript`.  *NeMo-Skills `62e4a50e` + `6e864b69`.*
+6. **`*-latest.sqsh` container symlinks** at
+   `/lustre/.../igitman/images/` point to
+   `/scratch/.../nemotron_n3_post/...`, which our
+   `nemotron_reason_science` account can't read.  Fix: pin the actual
+   hash (`nemo-skills-0a3c03f.sqsh`) via `--gym_container` /
+   `--sandbox_container`.  See [feedback_aws_cmh_containers.md].
+7. **`/tmp/smoke_ng.jsonl` doesn't exist on compute nodes.**  NeMo-Run
+   packages the *code*, not arbitrary input files.  Fix: copy the
+   smoke input to `/alaptev/data/smoke_ng.jsonl` (mounted as
+   `/alaptev/data` in the container) and reference that path.
+8. **Half-installed `.venv` from earlier killed runs** caused wandb to
+   miss its `util` submodule on the next attempt.  Fix: `rm -rf .venv`
+   once on the cluster so `uv sync` rebuilds cleanly; afterwards
+   subsequent runs use the established venv.
+9. **`AIAgent.__init__` rejects 4 kwargs** that NeMo-Gym was passing:
+   `use_streaming`, `temperature`, `insert_reasoning`, `persist_session`
+   are all gone upstream.  Fix: drop them from the `AIAgent(...)` call
+   in `responses_api_agents/hermes_agent/app.py`.  Kimi/Moonshot
+   temperature is server-managed; streaming is configured separately;
+   `persist_session` is governed by `skip_memory` + the agent's
+   internal `_persist_session` method.  *NeMo-Gym `7b40475`.*
+10. **`hermes-agent==0.14.0` requires `openai==2.24.0`**, NeMo-Gym
+    pins `openai==2.7.2`.  ng_run tries to `uv pip install` from the
+    per-server `requirements.txt` and dies on the unsolvable graph.
+    Fix: drop the `hermes-agent @ git+...` line from
+    `responses_api_agents/hermes_agent/requirements.txt`; callers
+    stage the source tree via `HERMES_AGENT_PATH` instead.
+    *NeMo-Gym `7b40475`.*
+11. **vllm-glm51-cu130-ray rejects `stream=True` with HTTP 422.**
+    Hermes' conversation loop prefers streaming for health-check
+    granularity and *doesn't* auto-fall-back on this 422.  Fix: new
+    `HermesAgentConfig.disable_streaming: bool` (default False); when
+    True, set `agent._disable_streaming = True` after construction,
+    which `conversation_loop.py` reads to route through the
+    non-streaming code path.  *NeMo-Gym `7b40475`.*
+12. **vLLM 500s on `"auto" tool choice` without
+    `--enable-auto-tool-choice --tool-call-parser`.**  Kimi-K2.6 wants
+    the `kimi_k2` parser.  Fix: add both flags to `server_args` in the
+    manifest.  *NeMo-Skills `0b2e7345`.*
+13. **`verifier_metadata` lost to `BaseVerifyResponse` schema.**
+    Passthrough verify doesn't propagate id / expected_answer.
+    `rollouts_materialized_inputs.jsonl` preserves it, but rollouts
+    are written async (out of order).  Fix: `convert_ng_to_ns.py`
+    joins the two files by *last user-message text*, not position.
+    *NeMo-Skills `0b2e7345`.*
+
+### Smoke results (Run 0 v7, job `287434`)
+
+5/5 correct from Kimi-K2.6, all in plain text:
+
+| Q | Kimi answer | Expected |
+|---|---|---|
+| Noble gas atomic#18 | argon (Ar) | argon |
+| Symbol for gold | Au (Final Answer: Au) | Au |
+| Boiling point of water | 100 °C | 100 |
+| Bones in adult body | 206 bones (Final Answer: 206 bones) | 206 |
+| Half-life of C-14 | 5,730 years (Final Answer: 5730) | 5730 |
+
+3 of 5 emit clean `Final Answer:` lines; the other 2 give the answer
+plain — extracted by `compare_runs.py`'s fallback path.
 
 **Goal:** answer the headline question "does the agent's memory/skill
 update (Phase 1 merge-back) actually improve accuracy on a hard
