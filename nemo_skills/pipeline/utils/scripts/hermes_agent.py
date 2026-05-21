@@ -394,12 +394,21 @@ class HermesHomeMergebackScript(BaseJobScript):
         audit_path: Where to write the audit JSON
             (before/after sha256 per file, size delta).
         dry_run: When True the script enumerates the diff without writing.
+        wait_for_sentinel: Optional sentinel file written by the gym
+            rollout step on EXIT.  We block on its existence before
+            running curator so the mergeback srun doesn't race past
+            (and tear down) the still-loading gym srun in a NeMo-Run
+            CommandGroup.  See ``NemoGymRolloutsScript.done_sentinel``.
+        wait_timeout_seconds: Cap on the sentinel poll so a stuck gym
+            doesn't leave mergeback hanging until SLURM walltime.
     """
 
     sources: List[str]
     template_path: str
     audit_path: str
     dry_run: bool = False
+    wait_for_sentinel: Optional[str] = None
+    wait_timeout_seconds: int = 6 * 3600
     log_prefix: str = field(default="hermes_mergeback", init=False)
     span_group_nodes: bool = False
 
@@ -409,9 +418,25 @@ class HermesHomeMergebackScript(BaseJobScript):
         sources_q = " ".join(shlex.quote(s) for s in self.sources)
         dry_flag = "--dry-run" if self.dry_run else ""
 
+        if self.wait_for_sentinel:
+            sentinel_q = shlex.quote(self.wait_for_sentinel)
+            wait_block = f"""echo "Waiting for gym sentinel: {self.wait_for_sentinel}"
+deadline=$(( $(date +%s) + {int(self.wait_timeout_seconds)} ))
+while [ ! -f {sentinel_q} ]; do
+    if [ "$(date +%s)" -ge "$deadline" ]; then
+        echo "ERROR: gym sentinel never appeared within {int(self.wait_timeout_seconds)}s"
+        exit 1
+    fi
+    sleep 10
+done
+echo "Gym sentinel present, proceeding to merge-back."
+"""
+        else:
+            wait_block = ""
+
         cmd = f"""set -euo pipefail
 echo "=== Hermes merge-back ==="
-mkdir -p "$(dirname {audit_q})"
+{wait_block}mkdir -p "$(dirname {audit_q})"
 python -m nemo_skills.scripts.merge_hermes_home \\
     --template {template_q} \\
     --audit {audit_q} \\

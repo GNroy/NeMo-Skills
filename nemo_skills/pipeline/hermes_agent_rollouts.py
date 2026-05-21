@@ -400,6 +400,10 @@ def _build_jobs(
             # placeholder; without the policy model entry, ng_run has
             # nowhere to put the ``+policy_base_url`` override below.
             orch_home = home_for(orchestrator.name)
+            # When merge-back is on, the mergeback step must wait for
+            # the gym to finish — otherwise NeMo-Run's wait-any sbatch
+            # wrapper sees mergeback exit (in ms) and SIGKILLs the gym.
+            gym_done_sentinel = f"{output_dir}/.gym_done" if merge_back else None
             commands.append(
                 Command(
                     script=NemoGymRolloutsScript(
@@ -410,6 +414,7 @@ def _build_jobs(
                         ],
                         input_file=input_file,
                         output_file=output_file,
+                        done_sentinel=gym_done_sentinel,
                         # Force the rollouts script to talk to the orchestrator's
                         # hermes_agent and to wire the per-agent HERMES_HOME so
                         # the overlay JSON (agent_name, trace_dir, persistence)
@@ -443,6 +448,7 @@ def _build_jobs(
                             template_path=template_path,
                             audit_path=f"{output_dir}/merge_audit.json",
                             dry_run=merge_dry_run,
+                            wait_for_sentinel=gym_done_sentinel,
                         ),
                         container=gym_container,
                         name=f"{expname}_mergeback",

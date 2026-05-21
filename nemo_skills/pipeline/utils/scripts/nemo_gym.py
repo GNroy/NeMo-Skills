@@ -65,6 +65,16 @@ class NemoGymRolloutsScript(BaseJobScript):
     # ``HERMES_AGENT_PATH`` env var; the snippet that prepends it to
     # PYTHONPATH lives above in the build_cmd body.
     hermes_agent_path: Optional[str] = None
+    # Phase 6: when this script runs alongside a parallel mergeback srun
+    # in the same NeMo-Run CommandGroup, the wrapper sbatch treats the
+    # first child to exit as the signal to tear down the rest.  The
+    # mergeback step is fast (ms), so without coordination it exits
+    # before rollouts even start and triggers a SIGKILL of this srun.
+    # When ``done_sentinel`` is set we ``trap`` an exit handler that
+    # touches the sentinel file — the mergeback waits on it before
+    # running curator, restoring the implicit "rollouts first, then
+    # mergeback" ordering CommandGroup doesn't give us for free.
+    done_sentinel: Optional[str] = None
     policy_api_key: str = "dummy"
     policy_model_name: Optional[str] = None
 
@@ -145,9 +155,18 @@ PY
             else:
                 resolve_gym_path = f"GYM_PATH={shlex.quote(str(self.gym_path))}"
 
+            if self.done_sentinel:
+                sentinel_q = shlex.quote(self.done_sentinel)
+                sentinel_setup = (
+                    f'mkdir -p "$(dirname {sentinel_q})"\n'
+                    f"trap 'touch {sentinel_q}' EXIT\n"
+                )
+            else:
+                sentinel_setup = ""
+
             cmd = f"""set -e
 set -o pipefail
-
+{sentinel_setup}
 # Install/sync NeMo Gym venv. The nemo-rl container has Gym pre-installed,
 # but when users mount a custom Gym path (e.g., from a dev branch or worktree),
 # the mounted directory may not have a .venv. The --allow-existing flag makes
