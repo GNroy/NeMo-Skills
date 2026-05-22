@@ -144,7 +144,12 @@ overlay = {
     "persist_session": False,
     "save_trajectories": save_trajectories,
     "enable_compression": False,
-    "chat_template_kwargs": {"thinking": False},
+    # Kimi-K2.6's deployment guide says thinking is the default-on mode
+    # and `--reasoning-parser kimi_k2` should be passed; we forced
+    # thinking=False in earlier runs and that left every tool-call
+    # rollout broken (tool_calls field empty, markers leaked into text).
+    # Letting it default (thinking=True) plus the reasoning parser on
+    # the daemon should fix tool extraction.
     "disable_streaming": True,
 }
 (home / "hermes_agent_overlay.json").write_text(json.dumps(overlay, indent=2))
