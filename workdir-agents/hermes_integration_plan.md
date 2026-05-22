@@ -729,12 +729,15 @@ so non-RL runs don't pay the storage cost.
 
 ## Phase 6 — Validation experiment (frontierscience-olympiad)
 
-**Status (2026-05-20 evening):** smoke succeeded.  Run 0 v7 (baseline,
-job `287434`) produced 5/5 correct answers on the hand-crafted smoke
-set with Kimi-K2.6 on aws-cmh.  Run 1 (learning, merge-back ON, job
-`288216`) was kicked off at session end; Run 2 + judges + comparator
-queued for the next session.  See "Phase 6 cluster-smoke field log"
-below for the 12 issues we found and fixed.
+**Status (2026-05-21 evening): persistent-daemon A/B/C smoke
+passes 15/15 YES across all three runs** (EXP_DIR
+`/lustre/.../exp/abc_smoke/20260522T002624Z`).  We've moved off
+`ns hermes_agent_rollouts` for the validation experiment in favour
+of a Gym-daemon-centric topology — see "Persistent-daemon
+architecture (2026-05-21)" below.  The old `ns hermes_agent_rollouts`
+pipeline still works (sentinel fix `0b1f447d` shipped) but isn't
+used for the smoke any more.  See "Phase 6 cluster-smoke field log"
+below for the 14 issues we found and fixed before pivoting.
 
 ### Phase 6 cluster-smoke field log (2026-05-20)
 
@@ -810,6 +813,79 @@ broke the pipeline; commit refs for the fixes:
     are written async (out of order).  Fix: `convert_ng_to_ns.py`
     joins the two files by *last user-message text*, not position.
     *NeMo-Skills `0b2e7345`.*
+14. **Mergeback srun races past gym in the same CommandGroup.**
+    `HermesHomeMergebackScript` ran in parallel with the gym; its
+    8 ms exit made NeMo-Run's wait-any sbatch wrapper SIGKILL the
+    still-loading gym.  Run 1 (job `288216`) came back `COMPLETED`
+    with no rollouts and a no-op `merge_audit.json`.  Fix: gym
+    `trap`s an EXIT handler that touches
+    `<output_dir>/.gym_done`; mergeback polls for that sentinel
+    (6 h cap) before running curator.  Wired only when
+    `merge_back=True`, so Run 0 stays unchanged.
+    *NeMo-Skills — local-only, awaiting GPG-signing resolution.*
+
+### Persistent-daemon architecture (2026-05-21)
+
+After two `ns hermes_agent_rollouts` smokes proved out Phase 1 but
+exposed two structural costs (Kimi re-booted per run, NS judging
+plumbing carried weight we'd be retiring soon anyway), we pivoted
+the validation flow to:
+
+```
+  Phase 1: Kimi vLLM daemon (1 GB300 node, TP=4, ~20 min boot)
+        + CPU rollout client:
+            for pass in {0,1,2}:
+              cp template → HERMES_HOME
+              write per-pass hermes_agent_overlay.json
+              ng_run (hermes_agent + passthrough verifier + vllm_model
+                      pointed at $KIMI_URL via policy_base_url)
+              ng_collect_rollouts
+              if pass == 1: curator + cp run1_template → run2_template
+        + scancel Kimi as soon as client exits
+
+  Phase 2: gpt-oss-120b vLLM daemon (1 GB300 node, TP=4, ~5 min boot)
+        + CPU judge client:
+            for run in {run0, run1, run2}:
+              judge_rollouts.py rollouts.jsonl → judged.jsonl
+        + scancel judge as soon as client exits
+```
+
+Total GPU-time per smoke: ~30 min Kimi + ~5 min judge ≈ 35 min,
+sequentially (no co-residency), against ~60+ min in the
+NS-pipeline-per-run topology.
+
+All scripts under
+[`workdir-agents/validation/scripts/daemons/`](validation/scripts/daemons/):
+[`vllm_daemon.sbatch`](validation/scripts/daemons/vllm_daemon.sbatch),
+[`rollout_phase.sbatch`](validation/scripts/daemons/rollout_phase.sbatch),
+[`judge_phase.sbatch`](validation/scripts/daemons/judge_phase.sbatch),
+[`judge_rollouts.py`](validation/scripts/daemons/judge_rollouts.py),
+[`curator.py`](validation/scripts/daemons/curator.py),
+[`launch_abc_smoke.sh`](validation/scripts/daemons/launch_abc_smoke.sh).
+
+Smoke result (2026-05-21, EXP_DIR
+`/alaptev/exp/abc_smoke/20260522T002624Z`):
+
+| Run | rollouts | judged YES | pass_rate |
+|---|---|---|---|
+| run0 | 5 | 5 | 1.0 |
+| run1 | 5 | 5 | 1.0 |
+| run2 | 5 | 5 | 1.0 |
+
+Caveat: `mean/turns_used: 1.0` for every pass — Kimi answers the
+smoke set without invoking any Hermes tools (including memory).
+This validates the *pipeline* but not the merge-back hypothesis
+itself; that needs the full 100-problem run on harder questions.
+
+Iterations getting there (in addition to the 14 field-log items):
+- `f34fc78c` — initial daemons/ tree
+- `2037fcbb` — copy merge_hermes_home.py to standalone curator.py
+  because `nemo_skills` isn't importable inside the Gym venv
+- `b8d8d41b` — bake aws-cmh env_vars block (TIKTOKEN_RS_CACHE_DIR
+  + HF_HUB_OFFLINE etc.) into every sbatch, so gpt-oss-120b
+  finds its pre-staged harmony vocab; add daemon-died fast-fail
+- `4ab7243d` — gate the daemon-died check on `command -v squeue`
+  (SLURM CLI isn't shipped in the client container)
 
 ### Smoke results (Run 0 v7, job `287434`)
 
