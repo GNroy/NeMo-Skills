@@ -52,10 +52,11 @@ until [ -s "$JUDGE_ENDPOINT_FILE" ]; do
         echo "ERROR: judge endpoint never appeared in 60 min"
         exit 1
     fi
-    # Bail out fast if the daemon's SLURM job has already exited —
-    # otherwise we'd burn the full 60 min polling for a file that
-    # will never be written.
-    if [ -n "${DAEMON_JOB_ID:-}" ]; then
+    # Bail out fast if the daemon's SLURM job has exited.  Only useful
+    # when squeue is on PATH — the nemo-skills client container doesn't
+    # ship SLURM CLI tools, so we just gate the check on availability
+    # and rely on the 60-min walltime ceiling otherwise.
+    if [ -n "${DAEMON_JOB_ID:-}" ] && command -v squeue >/dev/null 2>&1; then
         st=$(squeue -j "$DAEMON_JOB_ID" -h -o '%T' 2>/dev/null || true)
         if [ -z "$st" ]; then
             echo "ERROR: daemon job $DAEMON_JOB_ID is no longer in the queue (likely failed)"

@@ -65,8 +65,9 @@ until [ -s "$POLICY_ENDPOINT_FILE" ]; do
         echo "ERROR: policy endpoint never appeared in 60 min"
         exit 1
     fi
-    # Daemon-died fast fail (see judge_phase.sbatch for rationale).
-    if [ -n "${DAEMON_JOB_ID:-}" ]; then
+    # Daemon-died fast fail — only when squeue is on PATH (container
+    # doesn't ship SLURM CLI; see judge_phase.sbatch for the full reason).
+    if [ -n "${DAEMON_JOB_ID:-}" ] && command -v squeue >/dev/null 2>&1; then
         st=$(squeue -j "$DAEMON_JOB_ID" -h -o '%T' 2>/dev/null || true)
         if [ -z "$st" ]; then
             echo "ERROR: policy daemon job $DAEMON_JOB_ID is no longer in the queue"
