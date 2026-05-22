@@ -37,6 +37,19 @@ EXTRA_VLLM_ARGS="${EXTRA_VLLM_ARGS:-}"
 mkdir -p "$(dirname "${ENDPOINT_FILE}")" "${LOG_DIR}"
 trap 'rm -f "${ENDPOINT_FILE}"' EXIT
 
+# Mirror the aws-cmh env_vars block from cluster_configs/aws-cmh.yaml.
+# Without these the gpt-oss-120b harmony tokenizer can't find its
+# pre-staged vocab file and tries to download it under
+# HF_HUB_OFFLINE — which fails on compute nodes with no internet.
+# NS's pipeline sets these via its cluster config; raw sbatch scripts
+# don't get them for free, so we set them here explicitly.
+export HF_HOME=/alaptev/hf-cache
+export TRANSFORMERS_CACHE=/alaptev/hf-cache
+export HUGGINGFACE_HUB_CACHE=/alaptev/hf-cache
+export TIKTOKEN_ENCODINGS_BASE=/alaptev/tiktoken-encodings
+export TIKTOKEN_RS_CACHE_DIR=/alaptev/tiktoken-encodings/cache
+export HF_HUB_OFFLINE=1
+
 # Identity-mount the lustre user dir alongside the /alaptev alias so paths
 # work both inside the container (what srun sees) and on the login node
 # (where the launcher does cp/mkdir).  Without this, the launcher's

@@ -32,6 +32,14 @@ set -euo pipefail
 # Identity-mount the lustre user dir (see rollout_phase.sbatch for why).
 CONTAINER_MOUNTS="/lustre/fsw/portfolios/nemotron/users/igitman/hf_models:/hf_models,/lustre/fsw/portfolios/nemotron/users/alaptev:/alaptev,/lustre/fsw/portfolios/nemotron/users/alaptev:/lustre/fsw/portfolios/nemotron/users/alaptev,/lustre/fsw/portfolios/nemotron/users/alaptev/data:/data"
 
+# Standard cluster env_vars (see cluster_configs/aws-cmh.yaml).
+export HF_HOME=/alaptev/hf-cache
+export TRANSFORMERS_CACHE=/alaptev/hf-cache
+export HUGGINGFACE_HUB_CACHE=/alaptev/hf-cache
+export TIKTOKEN_ENCODINGS_BASE=/alaptev/tiktoken-encodings
+export TIKTOKEN_RS_CACHE_DIR=/alaptev/tiktoken-encodings/cache
+export HF_HUB_OFFLINE=1
+
 INNER_CMD=$(cat <<'INNER_EOF'
 set -euo pipefail
 
@@ -43,6 +51,17 @@ until [ -s "$JUDGE_ENDPOINT_FILE" ]; do
     if [ "$(date +%s)" -ge "$WAIT_DEADLINE" ]; then
         echo "ERROR: judge endpoint never appeared in 60 min"
         exit 1
+    fi
+    # Bail out fast if the daemon's SLURM job has already exited —
+    # otherwise we'd burn the full 60 min polling for a file that
+    # will never be written.
+    if [ -n "${DAEMON_JOB_ID:-}" ]; then
+        st=$(squeue -j "$DAEMON_JOB_ID" -h -o '%T' 2>/dev/null || true)
+        if [ -z "$st" ]; then
+            echo "ERROR: daemon job $DAEMON_JOB_ID is no longer in the queue (likely failed)"
+            sacct -j "$DAEMON_JOB_ID" -X -n -o State,ExitCode 2>/dev/null | head -1 || true
+            exit 1
+        fi
     fi
     sleep 10
 done
@@ -77,6 +96,6 @@ srun \
     --container-image "${CONTAINER}" \
     --container-mounts "${CONTAINER_MOUNTS}" \
     --no-container-mount-home \
-    --container-env=JUDGE_ENDPOINT_FILE,EXP_DIR,JUDGE_MODEL_NAME,JUDGE_PROMPT_YAML,JUDGE_SCRIPT \
+    --container-env=JUDGE_ENDPOINT_FILE,EXP_DIR,JUDGE_MODEL_NAME,JUDGE_PROMPT_YAML,JUDGE_SCRIPT,DAEMON_JOB_ID \
     --ntasks-per-node=1 \
     bash -c "${INNER_CMD}"

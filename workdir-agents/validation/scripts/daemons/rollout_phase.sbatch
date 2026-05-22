@@ -43,6 +43,15 @@ set -euo pipefail
 # /alaptev alias doesn't exist on the login node).
 CONTAINER_MOUNTS="/lustre/fsw/portfolios/nemotron/users/igitman/hf_models:/hf_models,/lustre/fsw/portfolios/nemotron/users/alaptev:/alaptev,/lustre/fsw/portfolios/nemotron/users/alaptev:/lustre/fsw/portfolios/nemotron/users/alaptev,/lustre/fsw/portfolios/nemotron/users/alaptev/data:/data"
 
+# Standard cluster env_vars (see cluster_configs/aws-cmh.yaml).  Set
+# explicitly because raw sbatch doesn't pick them up from NS pipeline.
+export HF_HOME=/alaptev/hf-cache
+export TRANSFORMERS_CACHE=/alaptev/hf-cache
+export HUGGINGFACE_HUB_CACHE=/alaptev/hf-cache
+export TIKTOKEN_ENCODINGS_BASE=/alaptev/tiktoken-encodings
+export TIKTOKEN_RS_CACHE_DIR=/alaptev/tiktoken-encodings/cache
+export HF_HUB_OFFLINE=1
+
 INNER_CMD=$(cat <<'INNER_EOF'
 set -euo pipefail
 
@@ -55,6 +64,15 @@ until [ -s "$POLICY_ENDPOINT_FILE" ]; do
     if [ "$(date +%s)" -ge "$WAIT_DEADLINE" ]; then
         echo "ERROR: policy endpoint never appeared in 60 min"
         exit 1
+    fi
+    # Daemon-died fast fail (see judge_phase.sbatch for rationale).
+    if [ -n "${DAEMON_JOB_ID:-}" ]; then
+        st=$(squeue -j "$DAEMON_JOB_ID" -h -o '%T' 2>/dev/null || true)
+        if [ -z "$st" ]; then
+            echo "ERROR: policy daemon job $DAEMON_JOB_ID is no longer in the queue"
+            sacct -j "$DAEMON_JOB_ID" -X -n -o State,ExitCode 2>/dev/null | head -1 || true
+            exit 1
+        fi
     fi
     sleep 10
 done
@@ -245,6 +263,6 @@ srun \
     --container-image "${CONTAINER}" \
     --container-mounts "${CONTAINER_MOUNTS}" \
     --no-container-mount-home \
-    --container-env=HF_HOME,TRANSFORMERS_CACHE,HUGGINGFACE_HUB_CACHE,TIKTOKEN_ENCODINGS_BASE,TIKTOKEN_RS_CACHE_DIR,HF_HUB_OFFLINE,POLICY_ENDPOINT_FILE,EXP_DIR,INPUT_FILE,GYM_PATH,HERMES_AGENT_PATH,TEMPLATE_RUN0,TEMPLATE_RUN1,TEMPLATE_RUN2,POLICY_MODEL_NAME,CURATOR_SCRIPT \
+    --container-env=HF_HOME,TRANSFORMERS_CACHE,HUGGINGFACE_HUB_CACHE,TIKTOKEN_ENCODINGS_BASE,TIKTOKEN_RS_CACHE_DIR,HF_HUB_OFFLINE,POLICY_ENDPOINT_FILE,EXP_DIR,INPUT_FILE,GYM_PATH,HERMES_AGENT_PATH,TEMPLATE_RUN0,TEMPLATE_RUN1,TEMPLATE_RUN2,POLICY_MODEL_NAME,CURATOR_SCRIPT,DAEMON_JOB_ID \
     --ntasks-per-node=1 \
     bash -c "${INNER_CMD}"
