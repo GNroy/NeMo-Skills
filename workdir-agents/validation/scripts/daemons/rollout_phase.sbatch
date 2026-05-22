@@ -124,9 +124,16 @@ cfg_path.write_text(yaml.safe_dump(cfg, sort_keys=True))
 
 # Per-pass overlay (HermesAgent._apply_overlay_file picks this up at
 # server init from <hermes_home>/hermes_agent_overlay.json).
+#
+# max_turns capped low (30) for the 100-problem run so a single rollout
+# hitting the cap can't blow past the 4h walltime; concurrency bumped to
+# 64 to drain the batch in fewer rounds.  Both can be overridden via
+# HERMES_MAX_TURNS / HERMES_CONCURRENCY env vars without re-editing.
+import os
 overlay = {
     "agent_name": "scientist",
-    "max_turns": 100,
+    "max_turns": int(os.environ.get("HERMES_MAX_TURNS", "30")),
+    "concurrency": int(os.environ.get("HERMES_CONCURRENCY", "64")),
     "enabled_toolsets": [
         "terminal", "file", "code_execution", "web",
         "skills", "memory", "browser",
@@ -264,6 +271,6 @@ srun \
     --container-image "${CONTAINER}" \
     --container-mounts "${CONTAINER_MOUNTS}" \
     --no-container-mount-home \
-    --container-env=HF_HOME,TRANSFORMERS_CACHE,HUGGINGFACE_HUB_CACHE,TIKTOKEN_ENCODINGS_BASE,TIKTOKEN_RS_CACHE_DIR,HF_HUB_OFFLINE,POLICY_ENDPOINT_FILE,EXP_DIR,INPUT_FILE,GYM_PATH,HERMES_AGENT_PATH,TEMPLATE_RUN0,TEMPLATE_RUN1,TEMPLATE_RUN2,POLICY_MODEL_NAME,CURATOR_SCRIPT,DAEMON_JOB_ID \
+    --container-env=HF_HOME,TRANSFORMERS_CACHE,HUGGINGFACE_HUB_CACHE,TIKTOKEN_ENCODINGS_BASE,TIKTOKEN_RS_CACHE_DIR,HF_HUB_OFFLINE,POLICY_ENDPOINT_FILE,EXP_DIR,INPUT_FILE,GYM_PATH,HERMES_AGENT_PATH,TEMPLATE_RUN0,TEMPLATE_RUN1,TEMPLATE_RUN2,POLICY_MODEL_NAME,CURATOR_SCRIPT,DAEMON_JOB_ID,HERMES_MAX_TURNS,HERMES_CONCURRENCY \
     --ntasks-per-node=1 \
     bash -c "${INNER_CMD}"
