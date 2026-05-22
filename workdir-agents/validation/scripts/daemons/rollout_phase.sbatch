@@ -19,6 +19,7 @@
 #   TEMPLATE_RUN2          HERMES_HOME template for Run 2 (= staged copy of post-mergeback TEMPLATE_RUN1)
 #   CONTAINER              client container (nemo-skills-0a3c03f.sqsh)
 #   POLICY_MODEL_NAME      what the daemon serves under --served-model-name (e.g. /hf_models/Kimi-K2.6)
+#   CURATOR_SCRIPT         path to curator.py (standalone merge_hermes_home; bundled in daemons/)
 #
 # Passthrough verifier — judging happens in the separate judge_phase job
 # so we don't keep Kimi GPUs and judge GPUs co-resident.
@@ -35,6 +36,7 @@ set -euo pipefail
 : "${TEMPLATE_RUN2:?required}"
 : "${CONTAINER:?required}"
 : "${POLICY_MODEL_NAME:?required}"
+: "${CURATOR_SCRIPT:?required}"
 
 # Identity-mount the lustre user dir so /lustre/... paths work inside
 # the container too — the launcher uses lustre paths everywhere (the
@@ -209,8 +211,10 @@ bootstrap_home "$TEMPLATE_RUN1" "$HERMES_HOME_1" true true
 run_pass run1 "$HERMES_HOME_1" true true "${EXP_DIR}/run1"
 
 # ---- Mergeback for Run 1 → mutates TEMPLATE_RUN1 in place ----
+# Uses the standalone curator.py shipped alongside this script; the
+# Gym venv doesn't have nemo_skills importable so we invoke by path.
 echo "[$(date -Is)] === mergeback: ${HERMES_HOME_1} → ${TEMPLATE_RUN1} ==="
-python3 -m nemo_skills.scripts.merge_hermes_home \
+python3 "$CURATOR_SCRIPT" \
     --template "$TEMPLATE_RUN1" \
     --audit "${EXP_DIR}/run1/merge_audit.json" \
     -- "$HERMES_HOME_1"
@@ -241,6 +245,6 @@ srun \
     --container-image "${CONTAINER}" \
     --container-mounts "${CONTAINER_MOUNTS}" \
     --no-container-mount-home \
-    --container-env=HF_HOME,TRANSFORMERS_CACHE,HUGGINGFACE_HUB_CACHE,TIKTOKEN_ENCODINGS_BASE,TIKTOKEN_RS_CACHE_DIR,HF_HUB_OFFLINE,POLICY_ENDPOINT_FILE,EXP_DIR,INPUT_FILE,GYM_PATH,HERMES_AGENT_PATH,TEMPLATE_RUN0,TEMPLATE_RUN1,TEMPLATE_RUN2,POLICY_MODEL_NAME \
+    --container-env=HF_HOME,TRANSFORMERS_CACHE,HUGGINGFACE_HUB_CACHE,TIKTOKEN_ENCODINGS_BASE,TIKTOKEN_RS_CACHE_DIR,HF_HUB_OFFLINE,POLICY_ENDPOINT_FILE,EXP_DIR,INPUT_FILE,GYM_PATH,HERMES_AGENT_PATH,TEMPLATE_RUN0,TEMPLATE_RUN1,TEMPLATE_RUN2,POLICY_MODEL_NAME,CURATOR_SCRIPT \
     --ntasks-per-node=1 \
     bash -c "${INNER_CMD}"
