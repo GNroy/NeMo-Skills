@@ -144,12 +144,13 @@ overlay = {
     "persist_session": False,
     "save_trajectories": save_trajectories,
     "enable_compression": False,
-    # Kimi-K2.6's deployment guide says thinking is the default-on mode
-    # and `--reasoning-parser kimi_k2` should be passed; we forced
-    # thinking=False in earlier runs and that left every tool-call
-    # rollout broken (tool_calls field empty, markers leaked into text).
-    # Letting it default (thinking=True) plus the reasoning parser on
-    # the daemon should fix tool extraction.
+    # thinking=False: chat template renders an empty <think></think> block,
+    # so model output lands in `content` (where Hermes reads it).  With
+    # thinking=True (default), --reasoning-parser kimi_k2 puts all output
+    # into `reasoning` and `content` stays empty — direct probes confirmed.
+    # Tool extraction is handled by our custom kimi_k26 tool-call parser
+    # (loaded via --tool-parser-plugin) regardless of thinking state.
+    "chat_template_kwargs": {"thinking": False},
     "disable_streaming": True,
 }
 (home / "hermes_agent_overlay.json").write_text(json.dumps(overlay, indent=2))
