@@ -729,6 +729,32 @@ so non-RL runs don't pay the storage cost.
 
 ## Phase 6 — Validation experiment (frontierscience-olympiad)
 
+**Status (2026-05-22 evening):** trivial-smoke pipeline still
+green (15/15 YES, 2026-05-21).  Tonight tried the 100-problem
+frontierscience set + a 10-problem pilot and uncovered two
+independent blockers; one is fixed, one is teed up for tomorrow.
+
+- **Kimi-K2.6 tool-call extraction — FIXED.** vLLM 0.19.x's stock
+  `--tool-call-parser kimi_k2` expects the chat template's input
+  rendering order; Kimi-K2.6 actually emits
+  `<begin><end>FUNC:N{ARGS}<arg_begin>`.  Stock regex never
+  matches, `tool_calls` always `[]`.  Custom plugin
+  `kimi_k26_tool_parser.py` (commit `00216324`) at
+  `/alaptev/reasoning_parsers/` inherits `KimiK2ToolParser` and
+  overrides just the regex + start sentinel.  Direct curl probe
+  verifies `tool_calls` now extracts cleanly.
+- **Empty rollout content — TOMORROW.** Pilot showed `mean_turns:
+  2.0` (Hermes IS using tools, up from 1.0) but every rollout's
+  `output[].content[].text` is empty.  2-turn direct curl
+  confirmed vLLM/Kimi return populated `content` both turns, so
+  the drop happens in our `NeMo-Gym/responses_api_agents/hermes_agent/app.py`
+  adapter, not at the model layer.  Start there next session.
+
+Also tonight: per-pass walltime at 100 problems is ~110 min, so
+3 passes don't fit in the cluster's 4h `batch` cap.  Need either a
+smaller subset (~50 problems), or split the passes into separate
+SLURM jobs that share one long-lived Kimi daemon.
+
 **Status (2026-05-21 evening): persistent-daemon A/B/C smoke
 passes 15/15 YES across all three runs** (EXP_DIR
 `/lustre/.../exp/abc_smoke/20260522T002624Z`).  We've moved off
