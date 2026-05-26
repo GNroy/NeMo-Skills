@@ -152,6 +152,14 @@ overlay = {
     # (loaded via --tool-parser-plugin) regardless of thinking state.
     "chat_template_kwargs": {"thinking": False},
     "disable_streaming": True,
+    # Promote message.reasoning_content -> message.content on Kimi-K2.6
+    # responses so Hermes' empty-content + thinking-prefill retries don't
+    # fire — K2.6 with --reasoning-parser kimi_k2 routes the full visible
+    # reply through reasoning_content and leaves content="" (confirmed
+    # via HERMES_DEBUG_MESSAGES probe 2026-05-26: content_len=0,
+    # reasoning_content_len=8862-10304).  No-op for models that populate
+    # content normally.
+    "promote_reasoning_to_content": True,
 }
 (home / "hermes_agent_overlay.json").write_text(json.dumps(overlay, indent=2))
 print(f"bootstrapped {home} from {template}; mcp={sorted(existing)}; overlay_keys={list(overlay)}")
