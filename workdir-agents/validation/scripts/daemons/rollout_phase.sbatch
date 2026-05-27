@@ -90,6 +90,13 @@ export OPENAI_BASE_URL="$POLICY_URL"
 export OPENAI_API_KEY="gym"
 echo "[$(date -Is)] OPENAI_BASE_URL=$OPENAI_BASE_URL (aux LLM = main policy)"
 
+# Raise Hermes' per-API-call timeout from the 1800s default to 3600s.  Hard
+# frontierscience problems with thinking ON can have K2.6 generate for >30 min
+# on a single turn; the default 1800s timeout was firing during the 100-problem
+# pilot, costing a full retry cycle (~30 min wasted + 30 min retry) per timeout.
+# 3600s gives the slowest legitimately-thinking responses room to land first try.
+export HERMES_API_TIMEOUT="${HERMES_API_TIMEOUT:-3600}"
+
 # 2. Install / sync the Gym venv (idempotent fast path).
 cd "$GYM_PATH"
 uv venv --python 3.12 --allow-existing .venv
@@ -324,6 +331,6 @@ srun \
     --container-image "${CONTAINER}" \
     --container-mounts "${CONTAINER_MOUNTS}" \
     --no-container-mount-home \
-    --container-env=HF_HOME,TRANSFORMERS_CACHE,HUGGINGFACE_HUB_CACHE,TIKTOKEN_ENCODINGS_BASE,TIKTOKEN_RS_CACHE_DIR,HF_HUB_OFFLINE,POLICY_ENDPOINT_FILE,EXP_DIR,INPUT_FILE,GYM_PATH,HERMES_AGENT_PATH,TEMPLATE_RUN0,TEMPLATE_RUN1,TEMPLATE_RUN2,POLICY_MODEL_NAME,CURATOR_SCRIPT,DAEMON_JOB_ID,HERMES_MAX_TURNS,HERMES_CONCURRENCY,HERMES_DEBUG_MESSAGES,OPENAI_BASE_URL,OPENAI_API_KEY \
+    --container-env=HF_HOME,TRANSFORMERS_CACHE,HUGGINGFACE_HUB_CACHE,TIKTOKEN_ENCODINGS_BASE,TIKTOKEN_RS_CACHE_DIR,HF_HUB_OFFLINE,POLICY_ENDPOINT_FILE,EXP_DIR,INPUT_FILE,GYM_PATH,HERMES_AGENT_PATH,TEMPLATE_RUN0,TEMPLATE_RUN1,TEMPLATE_RUN2,POLICY_MODEL_NAME,CURATOR_SCRIPT,DAEMON_JOB_ID,HERMES_MAX_TURNS,HERMES_CONCURRENCY,HERMES_DEBUG_MESSAGES,OPENAI_BASE_URL,OPENAI_API_KEY,HERMES_API_TIMEOUT \
     --ntasks-per-node=1 \
     bash -c "${INNER_CMD}"
