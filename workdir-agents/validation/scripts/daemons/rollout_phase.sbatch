@@ -80,6 +80,16 @@ done
 POLICY_URL=$(cat "$POLICY_ENDPOINT_FILE")
 echo "[$(date -Is)] policy endpoint: $POLICY_URL"
 
+# Point Hermes' auxiliary client (compression, session_search, web_extract,
+# vision) at the same policy endpoint via the ``main`` provider — keeps
+# everything on the warm vLLM daemon and silences the
+# "No auxiliary LLM provider configured" warning.  The aux client reads
+# OPENAI_BASE_URL + OPENAI_API_KEY, so we just export them here.
+# config.yaml's ``auxiliary.*.provider: main`` selects this provider.
+export OPENAI_BASE_URL="$POLICY_URL"
+export OPENAI_API_KEY="gym"
+echo "[$(date -Is)] OPENAI_BASE_URL=$OPENAI_BASE_URL (aux LLM = main policy)"
+
 # 2. Install / sync the Gym venv (idempotent fast path).
 cd "$GYM_PATH"
 uv venv --python 3.12 --allow-existing .venv
@@ -290,6 +300,6 @@ srun \
     --container-image "${CONTAINER}" \
     --container-mounts "${CONTAINER_MOUNTS}" \
     --no-container-mount-home \
-    --container-env=HF_HOME,TRANSFORMERS_CACHE,HUGGINGFACE_HUB_CACHE,TIKTOKEN_ENCODINGS_BASE,TIKTOKEN_RS_CACHE_DIR,HF_HUB_OFFLINE,POLICY_ENDPOINT_FILE,EXP_DIR,INPUT_FILE,GYM_PATH,HERMES_AGENT_PATH,TEMPLATE_RUN0,TEMPLATE_RUN1,TEMPLATE_RUN2,POLICY_MODEL_NAME,CURATOR_SCRIPT,DAEMON_JOB_ID,HERMES_MAX_TURNS,HERMES_CONCURRENCY,HERMES_DEBUG_MESSAGES \
+    --container-env=HF_HOME,TRANSFORMERS_CACHE,HUGGINGFACE_HUB_CACHE,TIKTOKEN_ENCODINGS_BASE,TIKTOKEN_RS_CACHE_DIR,HF_HUB_OFFLINE,POLICY_ENDPOINT_FILE,EXP_DIR,INPUT_FILE,GYM_PATH,HERMES_AGENT_PATH,TEMPLATE_RUN0,TEMPLATE_RUN1,TEMPLATE_RUN2,POLICY_MODEL_NAME,CURATOR_SCRIPT,DAEMON_JOB_ID,HERMES_MAX_TURNS,HERMES_CONCURRENCY,HERMES_DEBUG_MESSAGES,OPENAI_BASE_URL,OPENAI_API_KEY \
     --ntasks-per-node=1 \
     bash -c "${INNER_CMD}"
