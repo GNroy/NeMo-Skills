@@ -109,8 +109,10 @@ bootstrap_home () {
     local home="$2"
     local persist_memory="$3"
     local save_trajectories="$4"
+    POLICY_URL_FOR_BOOTSTRAP="${POLICY_URL:-}" \
+    POLICY_MODEL_NAME_FOR_BOOTSTRAP="${POLICY_MODEL_NAME:-}" \
     python3 - "$template" "$home" "$persist_memory" "$save_trajectories" <<'PY'
-import json, shutil, sys, yaml
+import json, os, shutil, sys, yaml
 from pathlib import Path
 
 template_arg, home_arg, persist_arg, save_arg = sys.argv[1:5]
@@ -128,7 +130,6 @@ shutil.copytree(template, home)
 # first (see hermes-agent/scripts/install.sh:547) and skips the ~50 MB
 # download + extract when it exists.  The cache lives on lustre so it's
 # shared across passes and reruns.
-import os
 node_cache = Path("/alaptev/cache/hermes_node/node")
 if node_cache.exists() and not (home / "node").exists():
     os.symlink(node_cache, home / "node")
@@ -140,6 +141,29 @@ cfg = yaml.safe_load(cfg_path.read_text()) if cfg_path.exists() else {}
 existing = (cfg.get("mcp_servers") or {})
 existing.update(mcp)
 cfg["mcp_servers"] = existing
+
+# Inject the resolved policy endpoint into auxiliary tasks.  Setting
+# ``auxiliary.<task>.base_url`` + ``api_key`` makes ``_resolve_task_provider_model``
+# return ``provider="custom"`` with EXPLICIT credentials (auxiliary_client.py:4321),
+# which bypasses Hermes' ``resolve_runtime_provider(requested="custom")`` path —
+# that path returns a non-None empty dict when no ``custom_providers:`` block is
+# configured, suppressing the OPENAI_BASE_URL env-var fallback in
+# ``_resolve_custom_runtime`` and causing the
+# "Configured auxiliary compression provider 'main' is unavailable" warning.
+# With explicit base_url + api_key we sidestep that whole resolution path.
+policy_url = os.environ.get("POLICY_URL_FOR_BOOTSTRAP", "").strip()
+policy_model = os.environ.get("POLICY_MODEL_NAME_FOR_BOOTSTRAP", "").strip()
+if policy_url:
+    aux = cfg.get("auxiliary") or {}
+    for task_name in ("compression", "session_search", "web_extract", "vision"):
+        task_cfg = aux.get(task_name) or {}
+        task_cfg["provider"] = "custom"
+        task_cfg["base_url"] = policy_url
+        task_cfg["api_key"] = "gym"
+        if policy_model:
+            task_cfg["model"] = policy_model
+        aux[task_name] = task_cfg
+    cfg["auxiliary"] = aux
 cfg_path.write_text(yaml.safe_dump(cfg, sort_keys=True))
 
 # Per-pass overlay (HermesAgent._apply_overlay_file picks this up at
