@@ -113,6 +113,16 @@ if home.exists():
     shutil.rmtree(home)
 shutil.copytree(template, home)
 
+# Pre-stage Node.js so Hermes's install.sh ("Node.js not found — installing
+# Node.js 22 LTS") short-circuits.  Hermes checks ``$HERMES_HOME/node/bin/node``
+# first (see hermes-agent/scripts/install.sh:547) and skips the ~50 MB
+# download + extract when it exists.  The cache lives on lustre so it's
+# shared across passes and reruns.
+import os
+node_cache = Path("/alaptev/cache/hermes_node/node")
+if node_cache.exists() and not (home / "node").exists():
+    os.symlink(node_cache, home / "node")
+
 # Manifest-supplied MCP servers — merged into Hermes's config.yaml.
 mcp = {"ns_python_tool": {"command": "python", "args": ["-m", "nemo_skills.mcp.servers.python_tool"]}}
 cfg_path = home / "config.yaml"
