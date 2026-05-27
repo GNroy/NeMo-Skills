@@ -30,7 +30,7 @@ POLICY_MODEL_PATH="${POLICY_MODEL_PATH:-/hf_models/Kimi-K2.6}"
 POLICY_MODEL_NAME="${POLICY_MODEL_NAME:-/hf_models/Kimi-K2.6}"
 POLICY_PORT="${POLICY_PORT:-35041}"
 POLICY_CONTAINER="${POLICY_CONTAINER:-/lustre/fsw/portfolios/nemotron/users/alaptev/containers/vllm-glm51-cu130-ray.sqsh}"
-POLICY_EXTRA_VLLM_ARGS="${POLICY_EXTRA_VLLM_ARGS:---enable-expert-parallel --distributed-executor-backend=ray --tensor-parallel-size 4 --compilation-config '{\"pass_config\": {\"fuse_allreduce_rms\": false}}' --model-loader-extra-config '{\"enable_multithread_load\": true, \"num_threads\": 96}' --max-model-len 131072 --enable-auto-tool-choice --tool-parser-plugin /lustre/fsw/portfolios/nemotron/users/alaptev/reasoning_parsers/kimi_k26_tool_parser.py --tool-call-parser kimi_k26 --reasoning-parser kimi_k2}"
+POLICY_EXTRA_VLLM_ARGS="${POLICY_EXTRA_VLLM_ARGS:---enable-expert-parallel --distributed-executor-backend=ray --data-parallel-size 4 --tensor-parallel-size 1 --language-model-only --compilation-config '{\"pass_config\": {\"fuse_allreduce_rms\": false}}' --model-loader-extra-config '{\"enable_multithread_load\": true, \"num_threads\": 96}' --max-model-len 131072 --enable-auto-tool-choice --tool-parser-plugin /lustre/fsw/portfolios/nemotron/users/alaptev/reasoning_parsers/kimi_k26_tool_parser.py --tool-call-parser kimi_k26 --reasoning-parser kimi_k2}"
 
 JUDGE_MODEL_PATH="${JUDGE_MODEL_PATH:-/hf_models/gpt-oss-120b}"
 JUDGE_MODEL_NAME="${JUDGE_MODEL_NAME:-/hf_models/gpt-oss-120b}"
