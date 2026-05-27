@@ -144,21 +144,16 @@ overlay = {
     "persist_session": False,
     "save_trajectories": save_trajectories,
     "enable_compression": False,
-    # thinking=False: chat template renders an empty <think></think> block,
-    # so model output lands in `content` (where Hermes reads it).  With
-    # thinking=True (default), --reasoning-parser kimi_k2 puts all output
-    # into `reasoning` and `content` stays empty — direct probes confirmed.
-    # Tool extraction is handled by our custom kimi_k26 tool-call parser
-    # (loaded via --tool-parser-plugin) regardless of thinking state.
-    "chat_template_kwargs": {"thinking": False},
+    # Leave thinking ON for K2.6 — needed for difficult multi-tool agentic
+    # work.  K2.6 + --reasoning-parser kimi_k2 routes the full visible reply
+    # (chain-of-thought ending with the final answer) through ``reasoning``
+    # and leaves ``content=""``; ``promote_reasoning_to_content`` below
+    # copies that into content so Hermes' empty-content / thinking-prefill
+    # retries don't fire and the LLM judge has populated assistant text to
+    # grade.  Tool extraction is handled by our custom kimi_k26 tool-call
+    # parser (loaded via --tool-parser-plugin) regardless of thinking state.
+    "chat_template_kwargs": {},
     "disable_streaming": True,
-    # Promote message.reasoning_content -> message.content on Kimi-K2.6
-    # responses so Hermes' empty-content + thinking-prefill retries don't
-    # fire — K2.6 with --reasoning-parser kimi_k2 routes the full visible
-    # reply through reasoning_content and leaves content="" (confirmed
-    # via HERMES_DEBUG_MESSAGES probe 2026-05-26: content_len=0,
-    # reasoning_content_len=8862-10304).  No-op for models that populate
-    # content normally.
     "promote_reasoning_to_content": True,
 }
 (home / "hermes_agent_overlay.json").write_text(json.dumps(overlay, indent=2))
