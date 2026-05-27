@@ -966,6 +966,234 @@ Each phase has a smoke command we should run before moving on.
 | Hermes git pin lags behind upstream | Re-pin to a tested commit per phase; CI smoke against the pin |
 | `mcp` SDK breakage between versions | Pin the SDK in `requirements.txt` with a `<next-major>` ceiling, matching Hermes's dependency policy |
 
+## Phase 7 — Persistent-daemon A/B/C at 100-problem scale + merge-back finding
+
+**Dates:** 2026-05-22 → 2026-05-27. **Branches:**
+NeMo-Gym `sandbox-hermes` (head `ca10f308` after rebase onto
+`upstream/main` `25028939`). NeMo-Skills `sandbox-agents`
+(head `510d582b`).
+
+### TL;DR
+
+End-to-end pipeline runs at 100-problem scale on aws-cmh. **Headline:**
+the merge-back hypothesis is **not validated** on frontierscience —
+not because the plumbing fails, but because the agent never writes
+to memory in the first place. The pipeline is solid; the science
+question needs a different benchmark or a different prompt strategy.
+
+### Headline experiment (run on 2026-05-27)
+
+EXP_DIR: `/lustre/.../alaptev/exp/abc/20260527_full100_050731Z`
+
+```
+run0: 67/100 (67.0%)   cold, no merge-back
+run1: 64/100 (64.0%)   merge-back ON     (-3 pts vs run0)
+run2: 62/99  (62.6%)   warm-template eval (-4.4 pts vs run0)
+```
+
+Phase 1 hit the 4 h `batch`-partition walltime at 100/100/99 rollouts
+(Run 2's last 2 problems hung on hard tail — problems 90–97 each took
+5–22 min). Phase 2 was re-launched manually via the new
+`workdir-agents/validation/scripts/daemons/run_judge_only.sh` wrapper
+against the saved rollouts. 10:12 min judging via gpt-oss-120b.
+
+### Root cause: agent never used memory
+
+```
+$ grep -cE 'memory_manage|memory_save|memory_add' \
+    run1/agents/scientist/hermes_home/logs/agent.log
+0
+```
+
+The merge-back is a no-op because the per-pass HERMES_HOME's
+`MEMORY.md` / `USER.md` / `skills/user/` were never written during
+Run 1. Curator copies "nothing" over the seed → `run1_template` is
+byte-identical to the cold `frontier_seed`. Run 2's "warm-template
+eval" is therefore the same config as Run 0.  The 67/64/62.6 spread
+is pure run-to-run noise across two effectively identical configs.
+
+Hermes did write a `SOUL.md` (513 B) during the run, but it's
+**outside** the merge-back allowlist
+(`MEMORY.md` / `USER.md` / `skills/user/`) so it never propagates —
+separate cleanup item, see Future directions below.
+
+### Why K2.6 doesn't write memory on frontierscience
+
+K2.6 is a thinking model. It solves each frontierscience problem
+self-contained in its `<think>` block (8–40 k chars of reasoning
+per turn). The benchmark is independent physics problems with no
+obvious shared structure → no lesson from problem N plausibly
+helps problem N+1, so the agent has no instinct to invoke
+`memory_manage`/`skill_*` tools. We observed ~20–30 % tool-use
+rate overall, dominated by `python_tool` for numeric checks, not
+memory tools.
+
+### v6 (10-problem pilot) was variance, not signal
+
+Earlier 2026-05-26 10-problem pilot showed
+`50 / 80 / 60 %` and read as +30 / +10 evidence for merge-back.
+The 100-problem run shows that was within the noise band. Two-sigma
+on n=10 with p ≈ 0.65 is ± ~30 pts — exactly the spread we observed.
+
+### What's validated end-to-end (everything except the science)
+
+- 100-problem A/B/C cycle: 3 passes on Kimi-K2.6 + 1 judge pass on
+  gpt-oss-120b, run from one `launch_abc_smoke.sh` invocation.
+- Persistent-daemon architecture: 1 Kimi cold-load amortised across
+  3 passes; daemon scancelled before judge daemon launches (no
+  GPU overlap).
+- Manual Phase-2 restart on walltime-killed Phase-1
+  (`run_judge_only.sh`) — saved this run from being thrown out.
+- Custom vLLM parsers for K2.6 on GB300 (tool + reasoning), plugin
+  pattern via `--{tool-parser,reasoning-parser}-plugin`.
+- Aux LLM routed at the warm policy endpoint via per-task
+  `base_url` + `api_key` injection at HERMES_HOME bootstrap (no
+  `OPENROUTER_API_KEY` requirement).
+- `HERMES_API_TIMEOUT=3600 s` (was 1800 s default — long-think
+  problems on hard physics generate >30 min per turn).
+- Node.js cache symlink → ~50 MB / pass saved on Hermes install.
+- DP=4 TP=1 + `--language-model-only` + multithread loader → Kimi
+  cold-load 5 min (was ~20 min).
+- Diagnostic logging gated on `HERMES_DEBUG_MESSAGES=1` (no-op
+  otherwise; logs per-message `content_len` / `reasoning_len` /
+  `reasoning_content_len` / tool_calls / msg.keys).
+- Adapter safety nets that are no-ops when the upstream parser
+  handles things but catch edge cases (vLLM upgrades, model
+  emit-format drift).
+
+### Phase 7 commit stack
+
+NeMo-Gym `sandbox-hermes` (rebased onto upstream/main 25028939; clean):
+
+| Commit | What |
+|---|---|
+| `132ead3a` | `_trajectory_to_output_items` falls back to `reasoning_content` / `reasoning` when `content` is empty (mirrors stirrup #1397); `HERMES_DEBUG_MESSAGES=1` opt-in per-message-shape log. |
+| `deffa5c5` | `HermesAgentConfig.promote_reasoning_to_content` + wrapper on `_interruptible_{api,streaming_api}_call` that copies `reasoning_content` → `content` before Hermes inspects. |
+| `da13aac3` | Wrapper also reads `msg.reasoning` (K2.6 + `--reasoning-parser kimi_k2` uses the legacy key); skip `enable_thinking=True` default when manifest disables thinking. |
+| `73fbeb54` | Adapter unwraps inline `<think>…</think>` blocks when content has nothing visible outside them (safety net for cases the upstream reasoning parser misses); aux LLM config; instrumented `hermes_promote` debug logs. |
+| `ca10f308` | `config.yaml` template sets `model.provider: custom` so `_read_main_provider()` resolves and `auxiliary.<task>.provider: main` doesn't fall through to "unavailable". |
+
+NeMo-Skills `sandbox-agents`:
+
+| Commit | What |
+|---|---|
+| `29ee3ece` | Kimi loader: `enable_multithread_load=true num_threads=96`. |
+| `ed9137e4` | Forward `HERMES_DEBUG_MESSAGES` into rollout container via `--container-env`. |
+| `4710717c` | Overlay JSON: thinking ON + `promote_reasoning_to_content=True`. |
+| `5d378fa7` | Pre-stage Node.js 22 arm64 at `/lustre/.../cache/hermes_node/node`; bootstrap symlinks `$HERMES_HOME/node`. |
+| `3640ab9c` | vLLM perf args: `--data-parallel-size 4 --tensor-parallel-size 1 --language-model-only`. |
+| `16824993` | Custom `kimi_k26` reasoning parser at `/lustre/.../alaptev/reasoning_parsers/kimi_k26_reasoning_parser.py`; rollout sbatch exports `OPENAI_BASE_URL=$POLICY_URL`. |
+| `7e32a5e8` | Bootstrap injects `auxiliary.<task>.base_url` + `api_key` + `model` into HERMES_HOME — fixes "aux provider 'main' unavailable". |
+| `29f96238` | `HERMES_API_TIMEOUT=3600` in rollout sbatch (default 1800 s was firing). |
+| `510d582b` | `run_judge_only.sh` — manual Phase 2 restart wrapper for walltime-killed Phase 1s. |
+
+### Colleague hand-off: GB300 / sm_100 vLLM stand-up
+
+Standalone Kimi-K2.6 minimal example for colleagues hitting the
+classic `CUDA error: no kernel image is available for execution on
+the device` on stock vLLM wheels:
+
+`/lustre/fsw/portfolios/nemotron/users/alaptev/share/kimi_k26_minimal/`
+- `launch_kimi_k26.sbatch` — vLLM serve on 1 node × 4 GPUs
+  (vllm-glm51-cu130-ray.sqsh container = sm_100 MLA kernels)
+- `ping.sh` — smoke `/v1/chat/completions` curl
+- `README.md` — explains GB300 mismatch, identity-mount + offline-mode
+  gotchas, perf args, parser plugin trade-offs
+
+### Cluster layout (as of 2026-05-27)
+
+| Path | Role |
+|---|---|
+| `/lustre/.../alaptev/abc_smoke/scripts/` | rsync target for `launch_abc_smoke.sh`, `vllm_daemon.sbatch`, `rollout_phase.sbatch`, `judge_phase.sbatch`, `judge_rollouts.py`, `curator.py`, `run_judge_only.sh` |
+| `/lustre/.../alaptev/reasoning_parsers/` | `kimi_k26_tool_parser.py` + `kimi_k26_reasoning_parser.py` (vLLM plugins) |
+| `/lustre/.../alaptev/hermes_home/frontier_seed/` | seed HERMES_HOME; has `model.provider: custom` + `auxiliary.<task>.provider: main` |
+| `/lustre/.../alaptev/cache/hermes_node/node/` | pre-staged Node.js 22 arm64 |
+| `/lustre/.../alaptev/containers/vllm-glm51-cu130-ray.sqsh` | GB300-compatible vLLM container (sm_100 MLA kernels) |
+| `/lustre/.../alaptev/share/kimi_k26_minimal/` | colleague hand-off (world-readable) |
+| `/lustre/.../alaptev/exp/abc/20260527_full100_050731Z/` | last full-100 run; `runN/judged.jsonl` has per-problem verdicts |
+
+### Future directions for the merge-back hypothesis
+
+The pipeline plumbing is solid; the science question is open.
+Three independent ways to actually test it:
+
+1. **Benchmark with shared structure.** frontierscience is
+   adversarially diverse — independent physics problems with no
+   obvious technique overlap. A benchmark where problems cluster by
+   topic (e.g. all Bayesian-inference word problems, all combinatorics
+   contest problems, all NumPy reshape gotchas) would let one
+   problem's lesson plausibly help the next. Candidates:
+   - SWE-bench subsets (same repo, multiple tasks)
+   - LiveCodeBench by difficulty bucket
+   - MATH partitioned by topic (algebra/geometry/probability)
+   - Custom curated set of physics problems all involving the same
+     experimental setup or formula family
+
+2. **System-prompt nudge that forces memory tool use.** After each
+   problem, prompt the agent: *"Now write a 1-sentence durable
+   lesson to MEMORY.md and a reusable technique to a skill file."*
+   This is an opinionated hand on the wheel; experimentally cheaper
+   to validate the hypothesis than swapping benchmarks. If pass
+   rate lifts under forced memory-write, we know the curator path
+   actually works; we can then decide if natural memory-use is
+   the right ask of a thinking model or if forcing is fine for a
+   training signal.
+
+3. **Widen the merge-back allowlist.** `SOUL.md` (Hermes' generated
+   personality summary), session DB exports, accumulated
+   conversation pre-summaries, or generated skills outside
+   `skills/user/` may already be useful artifacts that today's
+   allowlist throws away. Compare the curator audit log against
+   what Hermes actually wrote per pass to find candidates.
+
+Other tunings worth one round each:
+
+- **Tool-use lift via prompt.** ~20–30 % tool-call rate on Run 0.
+  Adding "use python_tool to verify numeric answers before
+  submitting" to the orchestrator system prompt should raise tool
+  use and pass rate together. Cheap to test (10 problems).
+- **Walltime overruns.** Run 2 hit 4 h on the slowest tail. Either
+  (a) request longer walltime, (b) split the 3 passes into separate
+  SLURM jobs that share a single long-lived Kimi daemon, or
+  (c) cap per-problem generation time below 1 h via `max_tokens`.
+- **Variance from a single seed.** All A/B/C numbers tonight come
+  from one trial. Two more trials with different seeds would tell
+  us if 67 / 64 / 62.6 is a tight neighbourhood (low variance,
+  merge-back truly neutral) or a wide one (any conclusion premature).
+
+### Phase 7 known gotchas (worth a memory pin)
+
+- **Stock `kimi_k2` reasoning parser anchors at start-of-output.**
+  K2.6 emits `<think>…</think>` mid-stream under the Hermes system
+  prompt. Custom plugin (`kimi_k26_reasoning_parser.py`) does
+  regex-based multi-block extraction.
+- **Stock `kimi_k2` tool-call parser regex expects a different
+  emit order than K2.6 actually produces.** Custom
+  `kimi_k26_tool_parser.py` (Phase 6 fix) overrides the regex.
+- **`thinking: false` + `enable_thinking: true` chat_template_kwargs
+  conflict.** Manifest sets `thinking: false` (K2.6 key) but the
+  Phase-6 adapter unconditionally added `enable_thinking: true` (Qwen
+  default) → mixed signals, K2.6 thinks anyway with empty content.
+  Phase 7 (`da13aac3`) skips the `enable_thinking` default when
+  thinking is explicitly disabled.
+- **`auxiliary.<task>.provider: main` → empty-dict trap.**
+  `_resolve_custom_runtime` in hermes-agent returns a non-None empty
+  dict when no `custom_providers:` block is configured, suppressing
+  the `OPENAI_BASE_URL` env-var fallback. Phase 7 (`7e32a5e8`)
+  bypasses by injecting explicit `base_url` + `api_key` per task
+  directly into the bootstrapped config.
+- **`--no-container-mount-home` resets `~/.hermes/`.** Hermes
+  re-installs Node.js (~50 MB) every container boot. Phase 7
+  (`5d378fa7`) pre-stages Node and symlinks it into each
+  per-pass HERMES_HOME.
+- **`stale-job cleanup` from other shared-account sessions.** Earlier
+  pilots were killed by another Claude Code session's stale-job
+  cleanup that did `squeue --me` without an expname filter. See
+  the user memory rule `feedback_scancel_scope.md`. Stay on
+  expname-prefixed scancel calls in our scripts.
+- **4 h walltime ceiling on `batch`.** Phase 1 hits this when Run 2
+  has hard-tail problems. `run_judge_only.sh` salvages Phase 2.
+
 ## Open follow-ups (non-blocking)
 
 - Decide per-worker reward attribution before training (Phase 5).
