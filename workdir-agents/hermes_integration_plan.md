@@ -1235,3 +1235,111 @@ Other tunings worth one round each:
   Pair with a NeMo-Gym test that swaps the fake AIAgent for one that
   records ``_build_api_kwargs`` output and asserts the temperature
   policy matches the model name.
+
+---
+
+## Phase 8 — Chunked-fanout architecture + NS pipeline decommission
+
+**Goal:** Two problems exposed by Phase 7's 100-problem run — (a) the 4h
+walltime is not tolerant to long-think tails (rollout phase died at
+98/100 + had to manual-restart Phase 2), and (b) we still depend on NS
+for benchmark-shaped pieces (judge phase, dataset loaders, curator) that
+the post-NS plan is going to retire.  Phase 8 addresses both at once,
+because they share the launcher surface.
+
+### Findings that shrank the work
+
+Pre-existing infrastructure made the redesign much smaller than feared:
+
+- `ng_collect_rollouts` already streams per-rollout JSONL writes
+  (`rollout_collection.py:405-434`) and supports `resume_from_cache`
+  (line 364) — per-problem checkpointing was *not* something we needed
+  to add.
+- NeMo-Gym already has a `frontierscience_judge` resources server
+  (`resources_servers/frontierscience_judge/app.py`) with the verbatim
+  Skills prompt and the same `Judgement: YES/NO` parsing — so the
+  separate judge phase / `judge_rollouts.py` becomes a no-op.
+- `cluster_configs/aws-cmh.yaml` already defines `cpu_partition: cpu`
+  and `get_executor()` auto-routes zero-GPU sbatch to it
+  (`pipeline/utils/exp.py:257-279`).  Our `rollout_phase.sbatch` was
+  *already* running on `--partition=cpu`; no GPU was being held idle
+  during CPU work.
+
+The actual NS coupling left at runtime: ~7 MCP server modules
+(`nemo_skills.mcp.servers.{python_tool,…}`) that Hermes launches as
+`python -m` subprocesses per rollout.  We are **leaving these in NS**
+as a library dep — the bridge resources server `ns_tools` in NG is
+HTTP-based and doesn't fit Hermes' MCP-stdio agent shape, so a full MCP
+migration would require restructuring Hermes' tool-handling layer.
+That's a separable Phase-9 cleanup if we want to truly drop the
+`nemo-skills` pip package.
+
+### What landed in Phase 8
+
+| Repo / file | Role |
+|---|---|
+| NeMo-Gym `resources_servers/frontierscience_judge/data/frontierscience_olympiad/{all,physics,chemistry,biology}.jsonl` | Dataset migrated from NS `nemo_skills/dataset/frontierscience-olympiad/`.  Local copy; not committed to NG git (per their dataset convention, larger sets go to GitLab — TBD). |
+| NeMo-Gym `responses_api_agents/hermes_agent/scripts/merge_hermes_home.py` | Curator migrated from NS `nemo_skills/scripts/merge_hermes_home.py`.  Already standalone (zero NS imports). |
+| NeMo-Skills `workdir-agents/validation/scripts/daemons/chunk_worker.sbatch` | **New.**  One pass × one chunk; judges in-loop via `frontierscience_judge`.  Replaces `rollout_phase.sbatch` (3-pass-per-job) + `judge_phase.sbatch` (separate judge phase). |
+| NeMo-Skills `workdir-agents/validation/scripts/daemons/launch_chunked.sh` | **New.**  Boots Kimi + judge daemons once; for each pass fans out `NUM_CHUNKS=4` parallel CPU chunk-workers; mergebacks all pass-1 chunk homes; aggregates per-pass reward at end. |
+| NeMo-Skills `workdir-agents/validation/scripts/daemons/prepare_frontierscience_input.py` | **New.**  Idempotent row-shape prep: hoists `verifier_metadata.{expected_answer,id,subset_for_metrics,...}` to top level (where the judge reads them), derives `question` from `responses_create_params.input[0]` if missing, forces `agent_ref` to `hermes_agent`.  Handles both the NS-source `all.jsonl` schema and the pre-converted NG `smoke_ng.jsonl` schema. |
+
+### Architectural changes vs. Phase 6/7
+
+1. **Judge is in-loop, not a separate phase.**  Both LLM daemons stay
+   up for the duration; verify happens during `ng_collect_rollouts`,
+   reward lands in the rollout JSONL.  No `judge_phase.sbatch`, no
+   `judge_rollouts.py`, no `run_judge_only.sh`.
+
+2. **One pass per chunk, N chunks per pass.**  Default `NUM_CHUNKS=4`
+   → 4 parallel CPU workers per pass × 3 passes = 12 small CPU jobs
+   instead of one 4h monolith.  Per-chunk walltime drops from 4h to
+   1h30m.  Daemon-side concurrency = `4 × 25 = 100` in-flight,
+   matching the previous monolithic `HERMES_CONCURRENCY=64`.
+
+3. **Per-problem checkpointing + resume-from-cache.**  `ng_collect_rollouts`
+   already streams; we additionally pass `+resume_from_cache=true` so a
+   walltime-killed chunk can be requeued and pick up where it left off.
+
+4. **Single curator call folds N chunk homes into the template.**
+   `merge_hermes_home.py` already accepts multiple HOMEs as positional
+   args; the launcher just collects all `pass1/chunk{i}/hermes_home`
+   dirs and passes them in one shot.
+
+### Files retired (kept as fallback until Phase 8 proves out)
+
+- `daemons/launch_abc_smoke.sh` (replaced by `launch_chunked.sh`)
+- `daemons/rollout_phase.sbatch` (replaced by `chunk_worker.sbatch`)
+- `daemons/judge_phase.sbatch` (verify is in-loop now)
+- `daemons/judge_rollouts.py` (replaced by `frontierscience_judge`)
+- `daemons/run_judge_only.sh` (no separate phase to restart)
+
+### Known gotchas
+
+- **smoke_ng.jsonl schema drift.**  The pre-existing
+  `/lustre/.../alaptev/data/smoke_ng.jsonl` uses the NG-standard
+  `verifier_metadata` nesting; `frontierscience_judge` reads
+  `expected_answer`/`question` off the top level.
+  `prepare_frontierscience_input.py` hoists between the two shapes.
+  Run it on any new input before pointing the launcher at it.
+- **Daemon walltime vs. total run time.**  Both daemons stay up for
+  ~3 × 30-min passes (~1h30m).  Should fit in the 4h node walltime,
+  but tight if any pass overruns.  The chunk workers fast-fail if the
+  daemon job leaves the queue (`squeue -j ...` poll).
+- **Cluster scripts dir lives at
+  `/lustre/.../alaptev/abc_smoke/scripts/`**, not under
+  `NeMo-Skills/` — the cluster checkout structure differs from the
+  laptop dev checkout.  Rsync target stays this dir.
+
+### Open follow-ups after Phase 8 smoke
+
+- Promote the runtime-composed `ng_run` config into a proper
+  `benchmarks/frontierscience_olympiad/config.yaml` (current pattern
+  composes at CLI time; idiomatic NG benchmarks use
+  `_inherit_from:` per `benchmarks/gpqa/config.yaml:7`).
+- Decide whether to upload the dataset to GitLab via
+  `ng_upload_dataset_to_gitlab` and add a `gitlab_identifier:` (per NG
+  CLAUDE.md, larger datasets shouldn't be committed to git).
+- Phase 9: if/when we want to fully drop `nemo-skills` pip,
+  migrate the 7 NS MCP modules into `nemo_gym/mcp/` and update
+  Hermes's manifest to point at the new paths.
