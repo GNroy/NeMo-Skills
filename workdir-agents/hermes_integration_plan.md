@@ -1343,3 +1343,107 @@ That's a separable Phase-9 cleanup if we want to truly drop the
 - Phase 9: if/when we want to fully drop `nemo-skills` pip,
   migrate the 7 NS MCP modules into `nemo_gym/mcp/` and update
   Hermes's manifest to point at the new paths.
+
+### Phase 8 follow-up — first real 100-problem run on the chunked stack
+
+**Result:** pass-0=50.5%, pass-1=57.0%, pass-2=50.0% (pass-2 truncated at 14
+rollouts).  Pass-0 is **16.5 pts below Phase 7's 67.0%** on the same input
+file — surprising, since the architecture is meant to be reward-equivalent
+to Phase 7, only faster.
+
+**Diagnosis (matched by problem question hash on 99 common rows):**
+
+| | Both YES | Both NO | P7→P8 regression | P7→P8 gain |
+|---|---|---|---|---|
+| count | 40 | 22 | **27** | 10 |
+
+15 of the 27 regressions follow an identical pattern:
+``turns_used=2`` + ``finished_naturally=True`` + last assistant message
+is short (~400 chars) and ends with planning prose ("Let me check if
+openbabel is available", "Let's search for…", "Let me try…") instead of
+``FINAL ANSWER:``.  In every case the agent's *first* turn had detailed
+analysis, but the model then issued a tool_call, the tool returned an
+inconvenient or numerical-but-uninterpreted result, and the model's
+*second* turn was planning prose with no tool_call → Hermes
+``conversation_loop.py:3746`` interprets "no tool_call on this turn"
+as natural end-of-conversation and breaks the loop.
+
+Hermes already has logic to handle this case — see
+[``looks_like_codex_intermediate_ack``](../../../hermes-agent/agent/agent_runtime_helpers.py)
+— but it returns False if any prior tool message exists
+(``agent_runtime_helpers.py:1719``) and requires workspace-y context
+markers (lines 1755–1781), so it never fires on our chemistry/physics
+trajectories.
+
+**Phase 8 follow-up fixes (NOT yet validated end-to-end — v4 in flight):**
+
+1. **System-message nudge in ``prepare_frontierscience_input.py``** —
+   prepends a 572-char system instruction to every row telling the model
+   to either invoke another tool or emit ``FINAL ANSWER:`` after any tool
+   result; explicitly bans planning-prose endings.  Idempotent (re-running
+   prep on already-prepped rows is a no-op).
+
+2. **Judge container → default ``nemo-skills-vllm-latest.sqsh``** instead
+   of the custom ``vllm-glm51-cu130-ray.sqsh``.  gpt-oss-120b doesn't
+   use MLA attention so it doesn't need the sm_100 custom build; using
+   the default vLLM image removes a maintenance surface.  Confirmed
+   working by the user.
+
+3. **``VLLM_ENGINE_READY_TIMEOUT_S=1800``** in ``vllm_daemon.sbatch`` —
+   the default 600s was hitting on slow-lustre days.  Wired through the
+   ``--container-env`` list.
+
+4. **Lustre-pinned uv Python via ``UV_PYTHON_INSTALL_DIR=/alaptev/uv-pythons``** —
+   the prior ``.venv/bin/python`` symlink pointed at
+   ``/root/.local/share/uv/python/...`` (per-container-instance), which
+   breaks when N chunks run in N separate containers.  Rebuilding once
+   with ``UV_PYTHON_INSTALL_DIR=/alaptev/uv-pythons`` and a clean
+   ``uv venv --python 3.12`` gives a stable symlink at
+   ``/alaptev/uv-pythons/cpython-3.12-linux-aarch64-gnu/bin/python3.12``
+   that resolves identically in every chunk container.
+
+5. **Removed ``uv sync`` from ``chunk_worker.sbatch``** — N concurrent
+   ``uv sync`` invocations on the shared lustre ``.venv`` corrupted the
+   ``ng_run`` binary mid-execution with
+   ``bad interpreter: Bad address`` (Lustre overwrites the binary while
+   another chunk's interpreter is reading it).  The worker now just
+   ``source .venv/bin/activate`` and fails fast with a clear message if
+   ``ng_run`` is missing (the launcher pre-flights this).
+
+**v2 failure mode (before the venv-race fix):** chunk 0 won the
+``uv sync`` race; chunks 1+ got corrupted binaries → exited at
+"ng_run died before all-healthy".
+
+**v3 failure mode (after removing ``uv sync`` from worker, before
+rebuilding the venv on stable Python):** v2's race had left
+``.venv/bin/python`` pointing at chunk-0's container-local ``/root/...``
+path.  v3 chunks ran in *different* containers where ``/root/`` is empty
+→ ``bad interpreter: No such file or directory``.
+
+**v4 (in flight at the time of this write):** all four fixes stacked.
+Pre-flight ``ng_run`` smoke passes on the rebuilt venv.
+
+### Operational checklist when adding a new container or refreshing NG
+
+If the NS client container changes (different ``nemo-skills-*.sqsh``) or
+NG dependencies update:
+
+```bash
+# One-shot inside a single container instance — never concurrent.
+srun --account=nemotron_reason_science \
+     --container-image=<new_sqsh> \
+     --container-mounts=/lustre/fsw/portfolios/nemotron/users/$USER:/alaptev \
+     --no-container-mount-home \
+     --partition=cpu --ntasks=1 --time=15 \
+     bash -c '
+       export UV_PYTHON_INSTALL_DIR=/alaptev/uv-pythons
+       mkdir -p $UV_PYTHON_INSTALL_DIR
+       cd /alaptev/NeMo-Gym
+       rm -rf .venv
+       uv venv --python 3.12 .venv
+       uv sync --active --extra dev
+     '
+```
+
+After that, ``$GYM_PATH/.venv/bin/ng_run`` should pass the pre-flight in
+``launch_chunked.sh`` and the chunked stack is ready.

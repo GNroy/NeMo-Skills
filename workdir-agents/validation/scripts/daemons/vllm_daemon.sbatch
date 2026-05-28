@@ -49,6 +49,11 @@ export HUGGINGFACE_HUB_CACHE=/alaptev/hf-cache
 export TIKTOKEN_ENCODINGS_BASE=/alaptev/tiktoken-encodings
 export TIKTOKEN_RS_CACHE_DIR=/alaptev/tiktoken-encodings/cache
 export HF_HUB_OFFLINE=1
+# Kimi-K2.6 cold-load can exceed vLLM's 600s engine-ready default when
+# lustre I/O is contended.  Bump to 30 min so the engine has slack.  Pure
+# multi-threaded weight loading on a warm cache lands in ~5 min; this
+# only matters for the cold first request of a session.
+export VLLM_ENGINE_READY_TIMEOUT_S="${VLLM_ENGINE_READY_TIMEOUT_S:-1800}"
 
 # Identity-mount the lustre user dir alongside the /alaptev alias so paths
 # work both inside the container (what srun sees) and on the login node
@@ -105,7 +110,7 @@ srun \
     --container-image "${CONTAINER}" \
     --container-mounts "${CONTAINER_MOUNTS}" \
     --no-container-mount-home \
-    --container-env=HF_HOME,TRANSFORMERS_CACHE,HUGGINGFACE_HUB_CACHE,TIKTOKEN_ENCODINGS_BASE,TIKTOKEN_RS_CACHE_DIR,HF_HUB_OFFLINE \
+    --container-env=HF_HOME,TRANSFORMERS_CACHE,HUGGINGFACE_HUB_CACHE,TIKTOKEN_ENCODINGS_BASE,TIKTOKEN_RS_CACHE_DIR,HF_HUB_OFFLINE,VLLM_ENGINE_READY_TIMEOUT_S \
     --gpus-per-node=4 \
     --ntasks-per-node=1 \
     bash -c "${INNER_CMD}"

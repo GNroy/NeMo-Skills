@@ -44,7 +44,7 @@ POLICY_EXTRA_VLLM_ARGS="${POLICY_EXTRA_VLLM_ARGS:---enable-expert-parallel --dis
 JUDGE_MODEL_PATH="${JUDGE_MODEL_PATH:-/hf_models/gpt-oss-120b}"
 JUDGE_MODEL_NAME="${JUDGE_MODEL_NAME:-/hf_models/gpt-oss-120b}"
 JUDGE_PORT="${JUDGE_PORT:-35042}"
-JUDGE_CONTAINER="${JUDGE_CONTAINER:-/lustre/fsw/portfolios/nemotron/users/alaptev/containers/vllm-glm51-cu130-ray.sqsh}"
+JUDGE_CONTAINER="${JUDGE_CONTAINER:-/lustre/fsw/portfolios/nemotron/users/igitman/images/nemo-skills-vllm-latest.sqsh}"
 JUDGE_EXTRA_VLLM_ARGS="${JUDGE_EXTRA_VLLM_ARGS:---tensor-parallel-size 4 --max-model-len 131072}"
 
 GYM_PATH="${GYM_PATH:-/lustre/fsw/portfolios/nemotron/users/alaptev/NeMo-Gym}"

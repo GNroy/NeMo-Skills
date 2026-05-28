@@ -201,11 +201,19 @@ overlay = {
 print(f"[bootstrap] {home} <- {template}; mcp={sorted(existing)}")
 PY
 
-# 4. Install / sync the Gym venv (idempotent fast path).
+# 4. Activate the pre-built Gym venv.  Setup (uv venv + uv sync) is done
+# ONCE in the launcher before any chunks are submitted (see
+# launch_chunked.sh) — re-running uv sync concurrently across chunks
+# corrupts in-flight ng_run binaries on lustre and crashes random chunks
+# with "bad interpreter: Bad address".
 cd "$GYM_PATH"
-uv venv --python 3.12 --allow-existing .venv
+if [ ! -x ".venv/bin/ng_run" ]; then
+    echo "ERROR: $GYM_PATH/.venv missing or stale (no ng_run binary)."
+    echo "       Run \`cd $GYM_PATH && uv sync --active --extra dev\` once"
+    echo "       on the login node or via the launcher's setup step."
+    exit 1
+fi
 source .venv/bin/activate
-uv sync --active --extra dev
 
 # 5. Stage hermes-agent on PYTHONPATH.
 export PYTHONPATH="$HERMES_AGENT_PATH${PYTHONPATH:+:$PYTHONPATH}"

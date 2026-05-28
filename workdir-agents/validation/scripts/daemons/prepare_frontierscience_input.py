@@ -31,6 +31,26 @@ from pathlib import Path
 
 _AGENT_REF = {"type": "responses_api_agents", "name": "hermes_agent"}
 
+# Nudge prepended as a system message to every rollout.  Addresses the
+# specific failure mode where K2.6 + Hermes-agent terminates early after
+# a tool call fails or returns inconvenient output — the model emits
+# planning prose ("Let me check if X is available") without a follow-up
+# tool_call, and Hermes' standard chat-completions loop interprets that
+# as "natural end of turn".  See workdir-agents/hermes_integration_plan.md
+# Phase 8 diagnostic for the agent_runtime_helpers heuristic that already
+# handles this for codex_responses mode only.
+_FINAL_ANSWER_NUDGE = (
+    "You are answering a science olympiad problem. After ANY tool call — "
+    "whether it succeeded, failed, or returned inconvenient output — you "
+    "MUST either (a) call another tool to make further progress, or "
+    "(b) emit a single line starting with 'FINAL ANSWER:' giving your "
+    "best current answer based on whatever information you have. "
+    "Do NOT stop your turn with planning prose like 'Let me check…', "
+    "'Let me try…', or 'Maybe I should…'. If you cannot make further "
+    "progress with the tools available, give your best reasoned guess "
+    "as the FINAL ANSWER rather than abandoning the problem."
+)
+
 
 def transform(row: dict) -> dict:
     out = dict(row)
@@ -65,8 +85,24 @@ def transform(row: dict) -> dict:
         out["responses_create_params"] = {
             "input": [{"role": "user", "content": out.get("question", "")}],
         }
+        rcp = out["responses_create_params"]
     elif "input" not in rcp or not rcp["input"]:
         rcp["input"] = [{"role": "user", "content": out.get("question", "")}]
+
+    # Prepend the FINAL ANSWER nudge as a system message if not already
+    # present.  Idempotent: re-running prep on already-prepped rows is a
+    # no-op.
+    inp = rcp["input"]
+    has_nudge = any(
+        isinstance(m, dict)
+        and m.get("role") == "system"
+        and isinstance(m.get("content"), str)
+        and "FINAL ANSWER:" in m["content"]
+        and "planning prose" in m["content"]
+        for m in inp
+    )
+    if not has_nudge:
+        rcp["input"] = [{"role": "system", "content": _FINAL_ANSWER_NUDGE}] + inp
     return out
 
 
