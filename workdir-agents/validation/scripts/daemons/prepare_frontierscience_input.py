@@ -31,25 +31,14 @@ from pathlib import Path
 
 _AGENT_REF = {"type": "responses_api_agents", "name": "hermes_agent"}
 
-# Nudge prepended as a system message to every rollout.  Addresses the
-# specific failure mode where K2.6 + Hermes-agent terminates early after
-# a tool call fails or returns inconvenient output — the model emits
-# planning prose ("Let me check if X is available") without a follow-up
-# tool_call, and Hermes' standard chat-completions loop interprets that
-# as "natural end of turn".  See workdir-agents/hermes_integration_plan.md
-# Phase 8 diagnostic for the agent_runtime_helpers heuristic that already
-# handles this for codex_responses mode only.
-_FINAL_ANSWER_NUDGE = (
-    "You are answering a science olympiad problem. After ANY tool call — "
-    "whether it succeeded, failed, or returned inconvenient output — you "
-    "MUST either (a) call another tool to make further progress, or "
-    "(b) emit a single line starting with 'FINAL ANSWER:' giving your "
-    "best current answer based on whatever information you have. "
-    "Do NOT stop your turn with planning prose like 'Let me check…', "
-    "'Let me try…', or 'Maybe I should…'. If you cannot make further "
-    "progress with the tools available, give your best reasoned guess "
-    "as the FINAL ANSWER rather than abandoning the problem."
-)
+# Earlier experiment: prepending a FINAL ANSWER nudge as a system message
+# (see Phase 8 follow-up notes in hermes_integration_plan.md).  Falsified
+# on the 25-problem v4 run — 48% vs 62.5% on the same slice without it.
+# The nudge pushes the model to commit confident-but-wrong answers
+# instead of working through the problem; removing it.  Keep this file
+# free of system-prompt manipulation; if we need to influence agent
+# termination behaviour, fix Hermes's continuation heuristic directly
+# (option (A) in the Phase 8 follow-up triage).
 
 
 def transform(row: dict) -> dict:
@@ -89,20 +78,20 @@ def transform(row: dict) -> dict:
     elif "input" not in rcp or not rcp["input"]:
         rcp["input"] = [{"role": "user", "content": out.get("question", "")}]
 
-    # Prepend the FINAL ANSWER nudge as a system message if not already
-    # present.  Idempotent: re-running prep on already-prepped rows is a
-    # no-op.
+    # If a previous prep added the FINAL ANSWER nudge (now reverted), strip
+    # it so rerunning prep on cached rollout-ready inputs gives the same
+    # shape as a fresh prep.  Detect by the unique phrase combination.
     inp = rcp["input"]
-    has_nudge = any(
-        isinstance(m, dict)
-        and m.get("role") == "system"
-        and isinstance(m.get("content"), str)
-        and "FINAL ANSWER:" in m["content"]
-        and "planning prose" in m["content"]
-        for m in inp
-    )
-    if not has_nudge:
-        rcp["input"] = [{"role": "system", "content": _FINAL_ANSWER_NUDGE}] + inp
+    rcp["input"] = [
+        m for m in inp
+        if not (
+            isinstance(m, dict)
+            and m.get("role") == "system"
+            and isinstance(m.get("content"), str)
+            and "FINAL ANSWER:" in m["content"]
+            and "planning prose" in m["content"]
+        )
+    ]
     return out
 
 
