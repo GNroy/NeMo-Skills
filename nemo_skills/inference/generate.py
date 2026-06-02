@@ -860,6 +860,18 @@ class GenerationTask:
         except asyncio.TimeoutError:
             LOG.warning("Session timed out after %ds — saving empty output.", self.cfg.session_timeout)
             output = {"generation": ""}
+        except Exception as e:
+            # A single datapoint must never take down the whole run.  Some
+            # failures are unrecoverable for this datapoint but isolated to it
+            # (e.g. a malformed tool call poisoning the conversation so the
+            # server rejects the follow-up turn with a 400) — in that case we
+            # mirror the timeout path: log loudly and save an empty output so
+            # the remaining datapoints (and the other random seeds) survive.
+            # asyncio.CancelledError is a BaseException and is intentionally
+            # not caught here.
+            LOG.error("Datapoint generation failed unrecoverably — saving empty output. Error: %s", e)
+            LOG.exception(e)
+            output = {"generation": ""}
         end_time = time.time()
 
         if self.cfg.add_generation_stats:
