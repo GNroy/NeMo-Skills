@@ -26,17 +26,29 @@ frontmatter (the machine-readable record) followed by the agent's free-form
 report (the human/LLM-readable narration). ``reflect`` (P3) reads these files
 off disk, so they must be persisted — not just returned inline.
 
-**Guaranteed close.** A ``clock_in`` must never dangle. Beyond the worker
-calling ``clock_off`` itself, the server flushes every still-open timer to
-disk as ``status: error`` on shutdown via two mechanisms:
+**Guaranteed close.** A ``clock_in`` must never dangle. Defence in depth, from
+the most robust to the most graceful:
 
+- **Eager stub (survives ``SIGKILL``).** ``clock_in`` immediately writes the
+  report file with ``status: in_progress`` / ``closed_by: pending``. If the
+  process is killed abruptly before ``clock_off`` — e.g. the MCP SDK spawns the
+  stdio server with ``setsid()`` so it escapes the parent cgroup, and an
+  orphaned subprocess gets ``SIGKILL``ed without a catchable signal when the
+  container is torn down — the stub still records that the task started. This is
+  the *only* mechanism that survives ``SIGKILL``; the two below are graceful
+  upgrades that finalise the record.
 - ``atexit`` — covers normal interpreter exit, including the common case where
-  the MCP client closes the stdio connection (EOF → ``main()`` returns → atexit).
+  the MCP client closes the stdio connection (EOF → ``main()`` returns → atexit);
+  flushes still-open timers to ``status: error`` / ``closed_by: shutdown_sweep``.
 - a ``SIGTERM`` / ``SIGHUP`` handler — covers walltime kills, which would not
   otherwise run ``atexit``.
 
-(``batch_solve`` adds a third mechanism in P2: a per-worker timeout that
+(``batch_solve`` adds a fourth mechanism in P2: a per-worker timeout that
 backfills a ``clock_off`` with ``closed_by: batch_solve_backfill``.)
+
+A task's on-disk record thus progresses: ``in_progress`` (clock_in) →
+``completed``/``early_exit``/… (clock_off) or ``error``/``shutdown_sweep``
+(sweep). The file is rewritten atomically at each step.
 
 Report layout (``§3`` of the design doc)::
 
@@ -87,6 +99,11 @@ logger = logging.getLogger(__name__)
 
 WORKLOG_VERSION = 1
 VALID_STATUSES = ("completed", "early_exit", "timeout", "error")
+# Written on the eager stub at clock_in (before any clock_off). NOT a valid
+# clock_off self-assessment: it only remains on disk if the worker was killed
+# between clock_in and clock_off/sweep.
+STATUS_IN_PROGRESS = "in_progress"
+CLOSED_BY_PENDING = "pending"
 _SAFE_RE = re.compile(r"[^A-Za-z0-9._-]+")
 
 
@@ -282,13 +299,46 @@ class WorklogTool(Tool):
                 "started_at": started_at,
                 "started_monotonic": time.monotonic(),
             }
+            # Persist an in_progress stub NOW (under the lock, so it cannot race
+            # a concurrent clock_off/sweep that keys on self._open). This is the
+            # record that survives an abrupt SIGKILL of an orphaned stdio
+            # subprocess, which would defeat the atexit/SIGTERM sweep.
+            stub_path = self._write_stub(
+                task_id=task_id, agent_id=a_id, started_at=started_at, description=task_description
+            )
         return {
             "status": "clocked_in",
             "task_id": task_id,
             "agent_id": a_id,
             "started_at": started_at,
+            "report_path": stub_path,
             "handle": task_id,
         }
+
+    def _write_stub(
+        self, *, task_id: str, agent_id: str, started_at: str, description: Optional[str]
+    ) -> Optional[str]:
+        """Best-effort eager stub at clock_in time.
+
+        Returns the path on success, ``None`` on failure. A failure here must
+        NOT break ``clock_in`` — the in-memory timer + shutdown sweep remain the
+        graceful-exit path; the stub is the extra floor that survives ``SIGKILL``.
+        """
+        try:
+            return self._write_report(
+                task_id=task_id,
+                agent_id=agent_id,
+                status=STATUS_IN_PROGRESS,
+                closed_by=CLOSED_BY_PENDING,
+                started_at=started_at,
+                ended_at=None,
+                elapsed_s=None,
+                description=description,
+                report=None,
+            )
+        except Exception:  # noqa: BLE001 — clock_in must not fail on a disk hiccup
+            logger.warning("worklog: failed to persist in_progress stub for task %r", task_id, exc_info=True)
+            return None
 
     def _clock_off(
         self,
@@ -367,7 +417,7 @@ class WorklogTool(Tool):
         status: str,
         closed_by: str,
         started_at: Optional[str],
-        ended_at: str,
+        ended_at: Optional[str],
         elapsed_s: Optional[float],
         description: Optional[str],
         report: Optional[str],
@@ -415,7 +465,13 @@ class WorklogTool(Tool):
         # Stub body for sweeps / backfills / empty reports so the report always
         # has the expected sections for reflect to scan.
         lines: List[str] = []
-        if closed_by != "self":
+        if closed_by == CLOSED_BY_PENDING:
+            lines.append(
+                "> Work IN PROGRESS — eager `clock_in` stub. This file is overwritten by "
+                "`clock_off` (final report) or the shutdown sweep. If this text remains, the "
+                "worker was killed before either ran."
+            )
+        elif closed_by != "self":
             lines.append(f"> Auto-generated stub: timer closed by `{closed_by}` without a self-reported `clock_off`.")
         else:
             lines.append("> No report text was provided at clock_off.")

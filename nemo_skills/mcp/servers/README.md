@@ -129,10 +129,21 @@ started_at, ended_at, elapsed_s`) followed by the agent's markdown report.
 | `agent_id` / `NS_WORKLOG_AGENT_ID` | `agent` | Who is logging (P2 workers pass their own per `clock_in`). |
 | `subdir` / `NS_WORKLOG_SUBDIR` | `""` | Relative dir under the run (P2: `workers/chunk_<k>`). |
 
-**Guaranteed close:** a `clock_in` never dangles. The server flushes every
-still-open timer to disk as `status: error`, `closed_by: shutdown_sweep` on
-process exit — via `atexit` (normal/EOF exit) and a `SIGTERM`/`SIGHUP` handler
-(walltime kills). (P2's `batch_solve` adds a per-worker timeout backfill.)
+**Guaranteed close** (defence in depth — a `clock_in` never dangles):
+
+1. **Eager stub (survives `SIGKILL`).** `clock_in` writes the report file
+   immediately as `status: in_progress`, `closed_by: pending`. If the worker is
+   killed abruptly before `clock_off` — e.g. the MCP SDK spawns the stdio server
+   with `setsid()`, so an orphaned subprocess is `SIGKILL`ed without a catchable
+   signal when the container is torn down — the stub still records that the task
+   started. This is the only layer that survives `SIGKILL`.
+2. **Shutdown sweep.** On a *graceful* exit the server flushes still-open timers
+   to `status: error`, `closed_by: shutdown_sweep` — via `atexit` (normal/EOF
+   exit) and a `SIGTERM`/`SIGHUP` handler (walltime kills).
+3. (P2's `batch_solve` adds an orchestrator-side per-worker timeout backfill.)
+
+A record progresses on disk: `in_progress` → `completed`/… (clock_off) or
+`error`/`shutdown_sweep` (sweep); each step rewrites the file atomically.
 
 ### Adding a new wrapped tool
 

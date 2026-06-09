@@ -25,10 +25,15 @@ Coverage:
     W12 — hostile task_id is sanitized; file stays inside the run dir
     W13 — list_tools advertises clock_in/clock_off with the right shape
     W14 — composes under ToolManager (qualified names)
+    W18 — clock_in eagerly writes an in_progress/pending stub (survives SIGKILL)
+    W19 — clock_off overwrites the stub in place → completed/self (one file)
+    W20 — sweep overwrites an open stub → error/shutdown_sweep
+    W21 — re-entrant clock_in keeps a single stub, original description preserved
   Over real stdio (ns-mcp-serve wrapper subprocess):
     W15 — list_tools round-trip
     W16 — clock_in + clock_off round-trip writes the file on disk
     W17 — un-closed timer is swept to disk when the server process exits (EOF)
+    W22 — clock_in writes the stub to disk immediately (observed mid-session)
 """
 
 from __future__ import annotations
@@ -46,7 +51,12 @@ import yaml
 from mcp import ClientSession
 from mcp.client.stdio import StdioServerParameters, stdio_client
 
-from nemo_skills.mcp.servers.agentic.worklog_tool import VALID_STATUSES, WorklogTool
+from nemo_skills.mcp.servers.agentic.worklog_tool import (
+    CLOSED_BY_PENDING,
+    STATUS_IN_PROGRESS,
+    VALID_STATUSES,
+    WorklogTool,
+)
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -307,6 +317,70 @@ def test_w14_composes_under_tool_manager(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# W18–W21 — eager clock_in stub (SIGKILL-survivable persistence)
+# ---------------------------------------------------------------------------
+
+
+def test_w18_clock_in_writes_in_progress_stub(tmp_path: Path) -> None:
+    tool = _make_tool(tmp_path)
+    ci = _run(tool.execute("clock_in", {"task_id": "p1", "task_description": "solving"}))
+    assert ci["status"] == "clocked_in"
+    # The stub is on disk the moment clock_in returns — this is the record that
+    # survives a SIGKILL of the (setsid-orphaned) stdio server before clock_off.
+    path = Path(ci["report_path"])
+    assert path == tmp_path / "r1" / "p1.md"
+    assert path.is_file()
+    fm, body = _parse_worklog(path.read_text())
+    assert fm["status"] == STATUS_IN_PROGRESS
+    assert fm["closed_by"] == CLOSED_BY_PENDING
+    assert fm["task_id"] == "p1"
+    assert fm["started_at"] and fm["started_at"].endswith("Z")
+    assert fm["ended_at"] is None
+    assert fm["elapsed_s"] is None
+    assert "IN PROGRESS" in body
+    assert "solving" in body  # description preserved on the stub
+
+
+def test_w19_clock_off_overwrites_stub_in_place(tmp_path: Path) -> None:
+    tool = _make_tool(tmp_path)
+    ci = _run(tool.execute("clock_in", {"task_id": "p1"}))
+    co = _run(tool.execute("clock_off", {"task_id": "p1", "status": "completed", "report": "done"}))
+    assert co["report_path"] == ci["report_path"]  # same path, overwritten atomically
+    files = sorted((tmp_path / "r1").glob("*.md"))
+    assert files == [tmp_path / "r1" / "p1.md"]  # exactly one file, no stub left behind
+    fm, body = _parse_worklog(files[0].read_text())
+    assert fm["status"] == "completed"
+    assert fm["closed_by"] == "self"
+    assert fm["ended_at"] and fm["elapsed_s"] is not None
+    assert "done" in body
+    assert "IN PROGRESS" not in body  # stub fully replaced
+
+
+def test_w20_sweep_overwrites_open_stub(tmp_path: Path) -> None:
+    tool = _make_tool(tmp_path)
+    _run(tool.execute("clock_in", {"task_id": "p1", "task_description": "never closed"}))
+    before, _ = _parse_worklog((tmp_path / "r1" / "p1.md").read_text())
+    assert before["status"] == STATUS_IN_PROGRESS  # stub present pre-sweep
+    tool._sweep_sync("shutdown_sweep")
+    after, _ = _parse_worklog((tmp_path / "r1" / "p1.md").read_text())
+    assert after["status"] == "error"
+    assert after["closed_by"] == "shutdown_sweep"
+    assert after["elapsed_s"] is not None  # timing known from the clock_in
+
+
+def test_w21_reentrant_clock_in_keeps_single_stub(tmp_path: Path) -> None:
+    tool = _make_tool(tmp_path)
+    ci1 = _run(tool.execute("clock_in", {"task_id": "p1", "task_description": "first"}))
+    ci2 = _run(tool.execute("clock_in", {"task_id": "p1", "task_description": "again"}))
+    assert ci2["status"] == "already_open"
+    assert ci1["report_path"] == str(tmp_path / "r1" / "p1.md")
+    files = list((tmp_path / "r1").glob("*.md"))
+    assert len(files) == 1  # no duplicate stub
+    _, body = _parse_worklog(files[0].read_text())
+    assert "first" in body  # original description kept; re-entrant call didn't rewrite
+
+
+# ---------------------------------------------------------------------------
 # W15 / W16 / W17 — real stdio round-trips through ns-mcp-serve
 # ---------------------------------------------------------------------------
 
@@ -382,3 +456,25 @@ def test_w17_unclosed_timer_swept_on_process_exit(tmp_path: Path) -> None:
     assert fm["status"] == "error"
     assert fm["closed_by"] == "shutdown_sweep"
     assert "left open" in body
+
+
+async def _clock_in_then_check_file(overrides: Dict[str, Any], path: Path) -> str:
+    async with stdio_client(_server_params(overrides)) as (read, write):
+        async with ClientSession(read, write) as session:
+            await session.initialize()
+            await session.call_tool("clock_in", {"task_id": "t1", "task_description": "stub now"})
+            # The stub must be on disk WHILE the session is still open — i.e.
+            # before any EOF/sweep. This is the SIGKILL-survivable property: if
+            # the process were killed at this instant, the record is already
+            # persisted. Read it here, before the context exits and sweeps.
+            assert path.is_file(), "eager stub not written on clock_in over stdio"
+            return path.read_text()
+
+
+def test_w22_clock_in_writes_stub_over_stdio(tmp_path: Path) -> None:
+    overrides = {"worklog_dir": str(tmp_path), "run_id": "s4", "agent_id": "stdio"}
+    text = asyncio.run(_clock_in_then_check_file(overrides, tmp_path / "s4" / "t1.md"))
+    fm, body = _parse_worklog(text)
+    assert fm["status"] == STATUS_IN_PROGRESS
+    assert fm["closed_by"] == CLOSED_BY_PENDING
+    assert "IN PROGRESS" in body
