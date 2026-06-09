@@ -1,0 +1,73 @@
+# Single-agent Hermes manifest for the SCI-548 `worklog` live smoke test.
+#
+# Goal: prove the worklog MCP tool fires inside a real Hermes rollout and that
+# clock_off writes markdown reports to disk. NOT a science benchmark.
+#
+# Model: Qwen3-Coder-30B-A3B-Instruct (reliable tool-caller on stock vLLM),
+# chosen over K2.6 because K2.6 needs the custom kimi_k26 parser + MLA container
+# and calls tools only ~20-30% of the time. One GB300 node, TP=4.
+#
+# worklog server: launched with the gym CONTAINER's system python
+# (/usr/bin/python3 — it has `mcp`, unlike the gym .venv) with
+# PYTHONPATH=/alaptev/NeMo-Skills so our freshly-deployed worklog code wins
+# over the (older) nemo_skills baked into the container. Validated on-cluster.
+
+template_hermes_home: /alaptev/NeMo-Gym/responses_api_agents/hermes_agent/hermes_home_template
+trace_dir_subpath: traces
+
+sandbox:
+  mounts: []
+
+agents:
+  scientist:
+    role: orchestrator
+    model: /hf_models/Qwen3-Coder-30B-A3B-Instruct
+    server_type: vllm
+    server_gpus: 4
+    server_nodes: 1
+    server_args: >-
+      --tensor-parallel-size 4
+      --max-model-len 32768
+      --trust-remote-code
+      --enable-auto-tool-choice
+      --tool-call-parser qwen3_coder
+    hermes:
+      max_turns: 30
+      # Minimal toolset: the agent only needs to answer a trivial question and
+      # call the worklog MCP tool. No sandbox => no terminal/code_execution.
+      # MCP tools register under toolset `mcp-<server>` and enabled_toolsets is
+      # a strict whitelist, so `mcp-worklog` MUST be listed or the worklog
+      # tools are filtered out even after discovery.
+      enabled_toolsets:
+        - file
+        - memory
+        - mcp-worklog
+      disabled_toolsets:
+        - terminal
+        - code_execution
+        - web
+        - browser
+        - skills
+        - send_message
+        - cronjob
+        - kanban
+        - delegate
+      persist_memory: false
+      persist_skills: false
+      persist_session: false
+      save_trajectories: true
+      enable_compression: false
+      disable_streaming: true
+      # The star of this test: the worklog MCP server (SCI-548 P1).
+      mcp_servers:
+        worklog:
+          command: /usr/bin/python3
+          args:
+            - -m
+            - nemo_skills.mcp.stdio_serve
+            - nemo_skills.mcp.servers.agentic.worklog_tool:WorklogTool
+          env:
+            PYTHONPATH: /alaptev/NeMo-Skills
+            NS_WORKLOG_DIR: /alaptev/exp/worklog_smoke_qwen8/worklogs
+            NS_WORKLOG_RUN_ID: smoke8
+            NS_WORKLOG_AGENT_ID: scientist
