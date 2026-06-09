@@ -46,6 +46,7 @@ server.  Use the generic stdio wrapper `nemo_skills.mcp.stdio_serve`
 | `nemo_skills.mcp.servers.physics.radioactivedecay_tool:RadioactivedecayTool` | Decay chain calculations. |
 | `nemo_skills.mcp.servers.web.arxiv_tool:ArxivSearchTool` | arXiv search + paper metadata. |
 | `nemo_skills.mcp.servers.web.wikipedia_tool:WikipediaSearchTool` | Wikipedia search + article fetch. |
+| `nemo_skills.mcp.servers.agentic.worklog_tool:WorklogTool` | Clock-in/clock-off work tracking; writes a markdown report per task ([agentic loop](#agentic-loop-tools-sci-548)). |
 
 Hermes consumes them uniformly:
 
@@ -85,6 +86,53 @@ mcp_servers:
 By default the MCP server name advertised over stdio matches the `Tool`
 class name.  Pass `--server-name foo` to override; rarely needed because
 Hermes uses its own YAML key for prefixing.
+
+### Agentic-loop tools (SCI-548)
+
+`nemo_skills.mcp.servers.agentic.*` hosts the tools for the self-improving
+Hermes swarm. **P1 ships `worklog`** — a clock-in / clock-off "punch clock":
+the agent calls `clock_in(task_id, task_description)` before a unit of work and
+`clock_off(task_id, status, report)` after, and the server writes one markdown
+report per task. `reflect` (P3) reads those files off disk, so they are
+persisted, not just returned inline.
+
+Wire it with run-scoped `--overrides` (or the matching env vars), so the
+launcher controls where reports land and how the run is labelled:
+
+```yaml
+mcp_servers:
+  worklog:
+    command: ns-mcp-serve
+    args:
+      - nemo_skills.mcp.servers.agentic.worklog_tool:WorklogTool
+      - --overrides
+      - '{"worklog_dir": "/path/to/run_artifacts", "run_id": "20260608T1200Z_run1", "agent_id": "orchestrator", "subdir": ""}'
+```
+
+The agent then sees the tools as `mcp_worklog_clock_in` / `mcp_worklog_clock_off`
+— Hermes sanitises and prefixes each MCP tool as `mcp_<server>_<tool>`. They live
+in toolset `mcp-worklog` (with `worklog` registered as an alias), so add
+`mcp-worklog` (or `worklog`) to the manifest's `enabled_toolsets` whitelist or the
+tools stay hidden. Reports are written to:
+
+```
+<worklog_dir>/<run_id>/<subdir>/<task_id>.md   # subdir defaults to "" (flat)
+```
+
+Each file is YAML frontmatter (`run_id, agent_id, task_id, status, closed_by,
+started_at, ended_at, elapsed_s`) followed by the agent's markdown report.
+
+| Override / env | Default | Purpose |
+|---|---|---|
+| `worklog_dir` / `NS_WORKLOG_DIR` | `worklogs` | Root for report files. |
+| `run_id` / `NS_WORKLOG_RUN_ID` | `run-<UTC ts>` | Run label = report subdir. **Set explicitly when several worklog servers must share one run dir.** |
+| `agent_id` / `NS_WORKLOG_AGENT_ID` | `agent` | Who is logging (P2 workers pass their own per `clock_in`). |
+| `subdir` / `NS_WORKLOG_SUBDIR` | `""` | Relative dir under the run (P2: `workers/chunk_<k>`). |
+
+**Guaranteed close:** a `clock_in` never dangles. The server flushes every
+still-open timer to disk as `status: error`, `closed_by: shutdown_sweep` on
+process exit — via `atexit` (normal/EOF exit) and a `SIGTERM`/`SIGHUP` handler
+(walltime kills). (P2's `batch_solve` adds a per-worker timeout backfill.)
 
 ### Adding a new wrapped tool
 
