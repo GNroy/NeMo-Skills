@@ -59,6 +59,7 @@ from nemo_skills.pipeline.utils.scripts import (
     HermesHomeBootstrapScript,
     HermesHomeMergebackScript,
     HermesKanbanDispatcherScript,
+    HermesWorklogEnrichScript,
     NemoGymRolloutsScript,
     SandboxScript,
     ServerScript,
@@ -220,6 +221,7 @@ def _build_jobs(
     time_min: Optional[str],
     merge_back: bool,
     merge_dry_run: bool,
+    enrich_worklogs: bool,
     extra_arguments: str,
     policy_api_key: str,
     policy_model_name: Optional[str],
@@ -432,7 +434,7 @@ def _build_jobs(
             # When merge-back is on, the mergeback step must wait for
             # the gym to finish — otherwise NeMo-Run's wait-any sbatch
             # wrapper sees mergeback exit (in ms) and SIGKILLs the gym.
-            gym_done_sentinel = f"{output_dir}/.gym_done" if merge_back else None
+            gym_done_sentinel = f"{output_dir}/.gym_done" if (merge_back or enrich_worklogs) else None
             commands.append(
                 Command(
                     script=NemoGymRolloutsScript(
@@ -481,6 +483,30 @@ def _build_jobs(
                         ),
                         container=gym_container,
                         name=f"{expname}_mergeback",
+                    )
+                )
+
+            if enrich_worklogs:
+                # Post-rollout trace-join: annotate each worklog report with the
+                # factual tools-used reconstructed from that agent's JSONL trace
+                # (orchestrator + delegate children alike). The enrich module
+                # lives on the agentic NeMo-Skills branch — same copy as the
+                # worklog MCP server — so we borrow that server's PYTHONPATH.
+                orch_worklog_servers = _extract_mcp_servers(orchestrator, {"output_dir": output_dir}) or {}
+                _wl = orch_worklog_servers.get("worklog", {}) if isinstance(orch_worklog_servers, dict) else {}
+                _wl_env = (_wl.get("env") or {}) if isinstance(_wl, dict) else {}
+                enrich_worklog_dir = _wl_env.get("NS_WORKLOG_DIR") or f"{output_dir}/worklogs"
+                enrich_pythonpath = _wl_env.get("PYTHONPATH")
+                commands.append(
+                    Command(
+                        script=HermesWorklogEnrichScript(
+                            trace_dir=f"{output_dir}/{manifest.trace_dir_subpath}",
+                            worklog_dir=enrich_worklog_dir,
+                            pythonpath=enrich_pythonpath,
+                            wait_for_sentinel=gym_done_sentinel,
+                        ),
+                        container=gym_container,
+                        name=f"{expname}_worklog_enrich",
                     )
                 )
 
@@ -577,6 +603,12 @@ def hermes_agent_rollouts(
         False,
         help="When --merge-back is on, only audit the diff without writing to the template.",
     ),
+    enrich_worklogs: bool = typer.Option(
+        False,
+        help="At job end, join each agent's trajectory trace into its worklog report "
+        "(factual tools-used table + claim-vs-observed diff). Requires the worklog MCP "
+        "server's PYTHONPATH to contain nemo_skills.mcp.servers.agentic.worklog_enrich.",
+    ),
     partition: Optional[str] = typer.Option(None, help="SLURM partition."),
     qos: Optional[str] = typer.Option(None, help="SLURM QoS."),
     time_min: Optional[str] = typer.Option(None, help="SLURM time-min."),
@@ -650,6 +682,7 @@ def hermes_agent_rollouts(
         time_min=time_min,
         merge_back=merge_back,
         merge_dry_run=merge_back_dry_run,
+        enrich_worklogs=enrich_worklogs,
         extra_arguments=extra_arguments,
         policy_api_key=policy_api_key,
         policy_model_name=policy_model_name,

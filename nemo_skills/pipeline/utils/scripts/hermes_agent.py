@@ -449,6 +449,87 @@ echo "Merge-back done. Audit: {self.audit_path}"
 
 
 # ---------------------------------------------------------------------------
+# Worklog enrichment (trace-join)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(kw_only=True)
+class HermesWorklogEnrichScript(BaseJobScript):
+    """Join trajectory traces into worklog reports at job end (SCI-548).
+
+    Wraps ``python -m nemo_skills.mcp.servers.agentic.worklog_enrich``: for each
+    agent's ``<session_id>.jsonl`` trace under ``trace_dir`` it reconstructs a
+    factual tools-used table and writes it onto the matching ``<task_id>.md``
+    worklog report (joined via the in-trace ``mcp_worklog_clock_in`` task_id),
+    plus a ``.tools.json`` sidecar + a claim-vs-observed diff.
+
+    The enrich module ships on the *agentic* NeMo-Skills branch (deployed to the
+    cluster separately from the submit-side repo at ``/nemo_run/code``), so
+    ``pythonpath`` mirrors the worklog MCP server's own PYTHONPATH from the
+    manifest — that is the copy guaranteed to contain ``worklog_enrich``.
+
+    Attributes:
+        trace_dir: Trace root (``<output_dir>/<trace_dir_subpath>``); globbed
+            recursively for ``*.jsonl`` so every agent (orchestrator + workers)
+            is covered.
+        worklog_dir: Worklog dir (``<output_dir>/worklogs``); globbed
+            recursively for ``*.md``.
+        pythonpath: PYTHONPATH prefix so the enrich module imports (the worklog
+            server's PYTHONPATH; ``None`` falls back to the mounted repo).
+        wait_for_sentinel: Gym-done sentinel to block on before enriching, so
+            this srun doesn't race past the still-running gym in a CommandGroup.
+        wait_timeout_seconds: Cap on the sentinel poll.
+    """
+
+    trace_dir: str
+    worklog_dir: str
+    pythonpath: Optional[str] = None
+    wait_for_sentinel: Optional[str] = None
+    wait_timeout_seconds: int = 6 * 3600
+    log_prefix: str = field(default="hermes_worklog_enrich", init=False)
+    span_group_nodes: bool = False
+
+    def __post_init__(self):
+        trace_q = shlex.quote(self.trace_dir)
+        worklog_q = shlex.quote(self.worklog_dir)
+
+        if self.wait_for_sentinel:
+            sentinel_q = shlex.quote(self.wait_for_sentinel)
+            wait_block = f"""echo "Waiting for gym sentinel: {self.wait_for_sentinel}"
+deadline=$(( $(date +%s) + {int(self.wait_timeout_seconds)} ))
+while [ ! -f {sentinel_q} ]; do
+    if [ "$(date +%s)" -ge "$deadline" ]; then
+        echo "ERROR: gym sentinel never appeared within {int(self.wait_timeout_seconds)}s"
+        exit 1
+    fi
+    sleep 10
+done
+echo "Gym sentinel present, proceeding to worklog enrichment."
+"""
+        else:
+            wait_block = ""
+
+        if self.pythonpath:
+            pp_q = shlex.quote(self.pythonpath)
+            pp_export = f'export PYTHONPATH={pp_q}:${{PYTHONPATH:-}}\n'
+        else:
+            pp_export = ""
+
+        # Best-effort: enrichment is observability, never a reason to fail a
+        # job whose rollouts already completed — so we don't `set -e` the
+        # python call and we exit 0 even if it hiccups.
+        cmd = f"""set -uo pipefail
+echo "=== Hermes worklog enrichment ==="
+{wait_block}{pp_export}python -m nemo_skills.mcp.servers.agentic.worklog_enrich \\
+    --trace-dir {trace_q} \\
+    --worklog-dir {worklog_q} || echo "WARN: worklog enrichment failed (non-fatal)"
+echo "Worklog enrichment done."
+"""
+        self.set_inline(cmd)
+        super().__post_init__()
+
+
+# ---------------------------------------------------------------------------
 # Phase 4 — Kanban dispatcher
 # ---------------------------------------------------------------------------
 

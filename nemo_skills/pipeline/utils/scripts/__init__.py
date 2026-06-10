@@ -23,6 +23,7 @@ from nemo_skills.pipeline.utils.scripts.hermes_agent import (
     HermesHomeBootstrapScript,
     HermesHomeMergebackScript,
     HermesKanbanDispatcherScript,
+    HermesWorklogEnrichScript,
 )
 from nemo_skills.pipeline.utils.scripts.nemo_gym import NemoGymRolloutsScript
 from nemo_skills.pipeline.utils.scripts.server import SandboxScript, ServerScript
@@ -36,6 +37,7 @@ __all__ = [
     "HermesHomeBootstrapScript",
     "HermesHomeMergebackScript",
     "HermesKanbanDispatcherScript",
+    "HermesWorklogEnrichScript",
     "NemoGymRolloutsScript",
     "SandboxScript",
     "ServerScript",
