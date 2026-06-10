@@ -1,0 +1,98 @@
+# Orchestrator manifest for the SCI-548 P2 `batch_solve` smoke (Kimi-K2.6).
+#
+# Same fan-out as batch_solve_qwen_manifest.yaml; differs only in the model +
+# Kimi tool/reasoning parser wiring (custom parser plugins) + run_id. Launch with
+#   --server_container /alaptev/containers/vllm-glm51-cu130-ray.sqsh
+# (GB300/MLA image); gym/sandbox containers stay the a70405c nemo-skills images.
+# serve_vllm adds --model/--trust-remote-code/--tensor-parallel-size, so they are
+# NOT repeated in server_args. Budget >=40 min for the cold weight load.
+# Kimi calls tools only ~20-30% unprompted; the orchestrator prompt mandates them.
+
+template_hermes_home: /alaptev/NeMo-Gym/responses_api_agents/hermes_agent/hermes_home_template
+trace_dir_subpath: traces
+sandbox:
+  mounts: []
+agents:
+  scientist:
+    role: orchestrator
+    model: /hf_models/Kimi-K2.6
+    server_type: vllm
+    server_gpus: 4
+    server_nodes: 1
+    # --model-loader-extra-config multithreads the safetensors load (96 threads)
+    # — THE fix for the slow cold weight load (~36 min → minutes). Works at TP=4
+    # (serve_vllm adds --tensor-parallel-size=4). NOTE: the reference sbatch also
+    # used --data-parallel-size 4 --tensor-parallel-size 1, but that is a
+    # THROUGHPUT choice (4 independent replicas) and via NS needs
+    # server_type=vllm_dp_ray (Ray-based); for a 4-problem smoke TP=4 loads at
+    # least as fast (one sharded copy vs 4 full copies). Reserve DP=4 for the
+    # large frontierscience throughput run. server_args is interpolated verbatim
+    # into the shell cmd, so the single-quoted JSON survives.
+    server_args: >-
+      --language-model-only
+      --max-model-len 131072
+      --enable-auto-tool-choice
+      --tool-parser-plugin /alaptev/reasoning_parsers/kimi_k26_tool_parser.py
+      --tool-call-parser kimi_k26
+      --reasoning-parser-plugin /alaptev/reasoning_parsers/kimi_k26_reasoning_parser.py
+      --reasoning-parser kimi_k26
+      --model-loader-extra-config '{"enable_multithread_load": true, "num_threads": 96}'
+    hermes:
+      max_turns: 40
+      enabled_toolsets:
+      - file
+      - memory
+      - delegation
+      - mcp-worklog
+      - mcp-benchmark
+      disabled_toolsets:
+      - terminal
+      - code_execution
+      - web
+      - browser
+      - skills
+      - send_message
+      - cronjob
+      - kanban
+      persist_memory: false
+      persist_skills: false
+      persist_session: false
+      save_trajectories: true
+      enable_compression: false
+      disable_streaming: true
+      # Kimi-K2.6 routes its visible reply through `reasoning_content` and leaves
+      # `content=""`. Hermes' loop reads that as a failed turn, burns its
+      # empty-content retry budget, and "finishes naturally" early — which is
+      # exactly what killed batch_solve_kimi2: Kimi clocked in then the session
+      # ended after 2 turns WITHOUT reaching load_benchmark/delegate_task. This
+      # knob promotes reasoning_content -> content so Hermes sees a populated
+      # reply and sustains the multi-step orchestration loop. (P1 kimi3 survived
+      # without it because it was ~1 turn; the orchestrator needs 4+.)
+      promote_reasoning_to_content: true
+      # SCI-548 option (a): Kimi narrates its next step ("Now loading the
+      # manifest.") with no tool call and stops; Hermes treats that as the final
+      # answer. This marker makes Hermes nudge Kimi to emit the next tool call
+      # until it writes "Final Answer:" (works for orchestrator "Final Answer:
+      # batch complete" AND workers "Final Answer: <answer>").
+      completion_marker: "Final Answer:"
+      mcp_servers:
+        worklog:
+          command: /usr/bin/python3
+          args:
+          - -m
+          - nemo_skills.mcp.stdio_serve
+          - nemo_skills.mcp.servers.agentic.worklog_tool:WorklogTool
+          env:
+            PYTHONPATH: /alaptev/NeMo-Skills-clean
+            NS_WORKLOG_DIR: /alaptev/exp/batch_solve_kimi/worklogs
+            NS_WORKLOG_RUN_ID: kbatch1
+            NS_WORKLOG_AGENT_ID: scientist
+        benchmark:
+          command: /usr/bin/python3
+          args:
+          - -m
+          - nemo_skills.mcp.stdio_serve
+          - nemo_skills.mcp.servers.agentic.benchmark_tool:BenchmarkTool
+          env:
+            PYTHONPATH: /alaptev/NeMo-Skills-clean
+            NS_BENCHMARK_PATH: /alaptev/data/batch_solve_smoke.jsonl
