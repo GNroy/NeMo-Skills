@@ -509,18 +509,26 @@ echo "Gym sentinel present, proceeding to worklog enrichment."
         else:
             wait_block = ""
 
+        # worklog_enrich has NO intra-package imports (stdlib + yaml only), so we
+        # invoke it BY FILE PATH rather than ``-m``. This sidesteps nemo_skills
+        # package resolution entirely: the container bakes/editable-installs a
+        # nemo_skills (the submit-side copy at /nemo_run/code) that shadows the
+        # worklog server's PYTHONPATH copy for ``-m`` and lacks this module. The
+        # path is derived from the worklog MCP server's PYTHONPATH (first entry)
+        # — the copy guaranteed to ship worklog_enrich.
         if self.pythonpath:
-            pp_q = shlex.quote(self.pythonpath)
-            pp_export = f'export PYTHONPATH={pp_q}:${{PYTHONPATH:-}}\n'
+            root = self.pythonpath.split(":")[0]
+            enrich_file = shlex.quote(f"{root}/nemo_skills/mcp/servers/agentic/worklog_enrich.py")
+            runner = f"python3 {enrich_file}"
         else:
-            pp_export = ""
+            runner = "python3 -m nemo_skills.mcp.servers.agentic.worklog_enrich"
 
         # Best-effort: enrichment is observability, never a reason to fail a
         # job whose rollouts already completed — so we don't `set -e` the
         # python call and we exit 0 even if it hiccups.
         cmd = f"""set -uo pipefail
 echo "=== Hermes worklog enrichment ==="
-{wait_block}{pp_export}python -m nemo_skills.mcp.servers.agentic.worklog_enrich \\
+{wait_block}{runner} \\
     --trace-dir {trace_q} \\
     --worklog-dir {worklog_q} || echo "WARN: worklog enrichment failed (non-fatal)"
 echo "Worklog enrichment done."
