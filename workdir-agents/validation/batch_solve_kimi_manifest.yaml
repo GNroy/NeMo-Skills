@@ -84,7 +84,7 @@ agents:
           - nemo_skills.mcp.servers.agentic.worklog_tool:WorklogTool
           env:
             PYTHONPATH: /alaptev/NeMo-Skills-clean
-            NS_WORKLOG_DIR: /alaptev/exp/batch_solve_kimi/worklogs
+            NS_WORKLOG_DIR: "{output_dir}/worklogs"
             NS_WORKLOG_RUN_ID: kbatch1
             NS_WORKLOG_AGENT_ID: scientist
         benchmark:
