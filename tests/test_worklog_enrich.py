@@ -25,6 +25,7 @@ Coverage:
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -98,6 +99,19 @@ def test_e1_summarize_derives_task_and_counts() -> None:
     assert by_name["mcp_benchmark_get_problem"]["calls"] == 2
     assert by_name["mcp_benchmark_get_problem"]["errors"] == 0
     assert "17+25" in by_name["mcp_benchmark_get_problem"]["first_result_preview"]
+
+
+def test_e1b_task_from_clock_off_when_no_clock_in() -> None:
+    # The orchestrator may clock_off "batch" without a matching clock_in
+    # (lenient close). The join must fall back to the clock_off task_id.
+    sid = "orch1"
+    events = [
+        _ev(sid, "tool_start", {"tc_id": "lb", "tool_name": "mcp_benchmark_load_benchmark", "args": {}}),
+        _ev(sid, "tool_start", {"tc_id": "co", "tool_name": "mcp_worklog_clock_off",
+                                "args": {"task_id": "batch", "status": "completed"}}),
+    ]
+    s = summarize_session(events)
+    assert s["task_id"] == "batch"  # derived from clock_off, no clock_in present
 
 
 def test_e2_error_counted_and_string_args_parsed() -> None:
@@ -223,6 +237,32 @@ def test_e7_no_clock_in_is_unmatched(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 # E8 — long results are truncated (bounded previews / trust boundary)
 # ---------------------------------------------------------------------------
+
+
+def test_e9_failed_write_leaves_report_intact(tmp_path: Path, monkeypatch) -> None:
+    # A write failure (e.g. disk-quota EDQUOT) must NOT truncate/corrupt the
+    # agent's existing report — the atomic temp+replace guarantees it.
+    import nemo_skills.mcp.servers.agentic.worklog_enrich as we
+
+    trace_dir = tmp_path / "traces"
+    worklog_dir = tmp_path / "worklogs" / "run1"
+    _write_trace(trace_dir / "scientist", "s", _clock_in_events("s", "bs-0"))
+    report = _write_report(worklog_dir, "bs-0", body="ORIGINAL REPORT BODY")
+    original = report.read_text()
+
+    real_replace = os.replace
+
+    def boom(src, dst):  # simulate EDQUOT on the atomic swap
+        raise OSError(122, "Disk quota exceeded")
+
+    monkeypatch.setattr(we.os, "replace", boom)
+    enrich(trace_dir, worklog_dir)  # must not raise, must not corrupt
+    monkeypatch.setattr(we.os, "replace", real_replace)
+
+    assert report.read_text() == original  # untouched
+    assert "ORIGINAL REPORT BODY" in report.read_text()
+    # No leftover temp files.
+    assert not list(worklog_dir.glob("*.enrich.tmp.*"))
 
 
 def test_e8_result_preview_truncated(tmp_path: Path) -> None:

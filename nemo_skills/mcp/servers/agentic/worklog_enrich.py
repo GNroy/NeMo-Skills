@@ -50,6 +50,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import re
 from datetime import datetime, timezone
 from pathlib import Path
@@ -159,6 +160,7 @@ def summarize_session(events: List[Dict[str, Any]], *, max_preview: int = 160) -
     """
     session_id: Optional[str] = None
     task_id: Optional[str] = None
+    task_id_fallback: Optional[str] = None  # from clock_off, if no clock_in
     order: List[str] = []
     tools: Dict[str, Dict[str, Any]] = {}
 
@@ -184,6 +186,13 @@ def summarize_session(events: List[Dict[str, Any]], *, max_preview: int = 160) -
                 tid = a.get("task_id")
                 if tid:
                     task_id = str(tid)
+            elif name == CLOCK_OFF_TOOL and task_id_fallback is None:
+                # An agent may clock_off without a matching clock_in (the
+                # orchestrator's lenient "batch" close). clock_off also carries
+                # task_id, so it's a sound fallback join key when clock_in is absent.
+                tid = a.get("task_id")
+                if tid:
+                    task_id_fallback = str(tid)
             t = _tool(name)
             t["calls"] += 1
             if t["first_args_preview"] is None:
@@ -202,7 +211,7 @@ def summarize_session(events: List[Dict[str, Any]], *, max_preview: int = 160) -
     observed = [dict(name=n, **tools[n]) for n in order]
     return {
         "session_id": session_id,
-        "task_id": task_id,
+        "task_id": task_id if task_id is not None else task_id_fallback,
         "observed": observed,
         "n_events": len(events),
     }
@@ -293,7 +302,19 @@ def _apply_to_report(md_path: Path, block: str, *, inplace: bool) -> None:
         new = _BLOCK_RE.sub(block, body)
     else:
         new = body + "\n\n" + block
-    md_path.write_text(new + "\n", encoding="utf-8")
+    # Atomic write: a failed write (e.g. disk-quota EDQUOT mid-write) must never
+    # truncate/corrupt the agent's existing report. Write to a temp sibling and
+    # os.replace only on success; on any error the original file is untouched.
+    tmp = md_path.with_suffix(md_path.suffix + f".enrich.tmp.{os.getpid()}")
+    try:
+        tmp.write_text(new + "\n", encoding="utf-8")
+        os.replace(tmp, md_path)
+    except OSError as exc:
+        logger.warning("worklog_enrich: cannot write report %s (left intact): %s", md_path, exc)
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
 
 
 def enrich(
