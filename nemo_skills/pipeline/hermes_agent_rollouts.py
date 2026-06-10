@@ -109,15 +109,44 @@ def _resolve_template_path(
     return f"/opt/Gym/{_DEFAULT_TEMPLATE_REL}"
 
 
-def _extract_mcp_servers(agent_spec: "HermesAgentSpec") -> Optional[Dict[str, Any]]:  # noqa: F821
+def _subst_placeholders(obj: Any, mapping: Dict[str, str]) -> Any:
+    """Recursively substitute ``{key}`` placeholders in all string values.
+
+    Lets a manifest reference run-scoped paths it cannot know up front — most
+    importantly ``{output_dir}`` so e.g. a worklog server can write under the
+    run's own output dir (``NS_WORKLOG_DIR: "{output_dir}/worklogs"``) instead
+    of a hardcoded path that drifts from ``--output_dir``. Only ``{known_key}``
+    tokens are replaced; any other ``{...}`` (or literal braces) is left intact.
+    """
+    if isinstance(obj, str):
+        out = obj
+        for key, val in mapping.items():
+            out = out.replace("{" + key + "}", val)
+        return out
+    if isinstance(obj, dict):
+        return {k: _subst_placeholders(v, mapping) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_subst_placeholders(v, mapping) for v in obj]
+    return obj
+
+
+def _extract_mcp_servers(
+    agent_spec: "HermesAgentSpec", placeholders: Optional[Dict[str, str]] = None  # noqa: F821
+) -> Optional[Dict[str, Any]]:
     """Pop the ``mcp_servers`` block out of the manifest's hermes overlay.
 
     Hermes reads its MCP server map from ``<HERMES_HOME>/config.yaml``,
     not from the NeMo-Gym HermesAgentConfig — keeping the key out of the
     overlay JSON avoids the noisy "unknown overlay key" warning emitted
     by ``_apply_overlay_file`` for fields HermesAgentConfig doesn't model.
+
+    ``placeholders`` (e.g. ``{"output_dir": ...}``) are substituted into the
+    block's string values so manifests can reference run-scoped paths.
     """
-    return agent_spec.hermes.get("mcp_servers")
+    servers = agent_spec.hermes.get("mcp_servers")
+    if servers and placeholders:
+        servers = _subst_placeholders(servers, placeholders)
+    return servers
 
 
 def _build_overlay(
@@ -342,7 +371,7 @@ def _build_jobs(
                         agent_home=home_for(agent.name),
                         overlay=overlay,
                         shared_kanban_db=manifest.shared_kanban_db,
-                        mcp_servers=_extract_mcp_servers(agent),
+                        mcp_servers=_extract_mcp_servers(agent, {"output_dir": output_dir}),
                     ),
                     container=gym_container,
                     name=f"{expname}_{agent.name}_bootstrap",

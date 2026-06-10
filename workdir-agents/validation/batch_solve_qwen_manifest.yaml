@@ -1,0 +1,99 @@
+# Orchestrator manifest for the SCI-548 P2 `batch_solve` smoke (Qwen3-Coder).
+#
+# Proves the self-improving-swarm fan-out end-to-end:
+#   orchestrator → mcp_benchmark_load_benchmark (ids only) → delegate_task
+#   (one worker per id) → each worker mcp_benchmark_get_problem + worklog
+#   clock_in/off → orchestrator clocks off "batch".
+#
+# `batch_solve` is NOT new code: it is Hermes-native `delegate_task`. P2's new
+# NS code is the `benchmark` trust-boundary MCP server (load_benchmark /
+# get_problem) deployed at /alaptev/NeMo-Skills-clean (branch agentic-tools-sci548).
+#
+# Tool host wiring (verified in hermes-agent):
+#   - delegate_task lives in toolset `delegation` → must be in enabled_toolsets.
+#   - delegate children inherit MCP toolsets (delegation.inherit_mcp_toolsets
+#     default True) → workers automatically get mcp-worklog + mcp-benchmark.
+#   - DELEGATE_BLOCKED_TOOLS strips {delegation, clarify, memory, code_execution}
+#     from children → workers CANNOT delegate or write memory (by design).
+#   - children inherit the parent's vLLM endpoint/model (no per-child model cfg).
+#   - max_concurrent_children defaults to 3; the 4-problem smoke runs 3 then 1.
+#
+# No sandbox: the smoke's problems are simple factual/arithmetic Qs the model
+# answers by reasoning, so workers need neither terminal nor code_execution.
+
+template_hermes_home: /alaptev/NeMo-Gym/responses_api_agents/hermes_agent/hermes_home_template
+trace_dir_subpath: traces
+
+sandbox:
+  mounts: []
+
+agents:
+  scientist:
+    role: orchestrator
+    model: /hf_models/Qwen3-Coder-30B-A3B-Instruct
+    server_type: vllm
+    # Full node (4 GPUs) to satisfy the batch QOS (QOSMinGRES rejects <4), but
+    # run TP=2 (2 GPUs idle). The dc43f3e container's newer vLLM (v0.22.0)
+    # rejects this MoE at TP=4: "intermediate_size % 128 == 0 (64 vs 0)" — the
+    # per-shard MoE intermediate (256/4=64) isn't a multiple of 128. At TP=2 it
+    # is 128 (ok). The old a70405c vLLM had no such constraint. serve_vllm
+    # auto-adds --tensor-parallel-size=4; our trailing --tensor-parallel-size 2
+    # wins (argparse last-occurrence) → TP=2.
+    server_gpus: 4
+    server_nodes: 1
+    server_args: >-
+      --tensor-parallel-size 2
+      --max-model-len 32768
+      --enable-auto-tool-choice
+      --tool-call-parser qwen3_coder
+    hermes:
+      max_turns: 40
+      # Orchestrator needs: delegation (delegate_task), mcp-benchmark
+      # (load_benchmark), mcp-worklog (its own clock), file/memory.
+      # Workers inherit mcp-worklog + mcp-benchmark + file (delegation/memory
+      # stripped by DELEGATE_BLOCKED_TOOLS).
+      enabled_toolsets:
+        - file
+        - memory
+        - delegation
+        - mcp-worklog
+        - mcp-benchmark
+      disabled_toolsets:
+        - terminal
+        - code_execution
+        - web
+        - browser
+        - skills
+        - send_message
+        - cronjob
+        - kanban
+      persist_memory: false
+      persist_skills: false
+      persist_session: false
+      save_trajectories: true
+      enable_compression: false
+      disable_streaming: true
+      mcp_servers:
+        worklog:
+          command: /usr/bin/python3
+          args:
+            - -m
+            - nemo_skills.mcp.stdio_serve
+            - nemo_skills.mcp.servers.agentic.worklog_tool:WorklogTool
+          env:
+            PYTHONPATH: /alaptev/NeMo-Skills-clean
+            NS_WORKLOG_DIR: "{output_dir}/worklogs"
+            NS_WORKLOG_RUN_ID: qbatch1
+            NS_WORKLOG_AGENT_ID: scientist
+        benchmark:
+          command: /usr/bin/python3
+          args:
+            - -m
+            - nemo_skills.mcp.stdio_serve
+            - nemo_skills.mcp.servers.agentic.benchmark_tool:BenchmarkTool
+          env:
+            PYTHONPATH: /alaptev/NeMo-Skills-clean
+            # Lets a worker's get_problem lazy-load even if its child context
+            # never saw the orchestrator's load_benchmark call; also the path
+            # the orchestrator passes to load_benchmark.
+            NS_BENCHMARK_PATH: /alaptev/data/batch_solve_smoke.jsonl
