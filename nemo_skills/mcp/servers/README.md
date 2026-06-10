@@ -122,6 +122,9 @@ tools stay hidden. Reports are written to:
 
 Each file is YAML frontmatter (`run_id, agent_id, task_id, status, closed_by,
 started_at, ended_at, elapsed_s`) followed by the agent's markdown report.
+`clock_off` also accepts an optional structured `tools_used`
+(`[{name, helped, note}]`) self-report; when given it lands in the frontmatter
+and `worklog_enrich` (below) diffs it against the trace's observed tool calls.
 
 | Override / env | Default | Purpose |
 |---|---|---|
@@ -145,6 +148,28 @@ started_at, ended_at, elapsed_s`) followed by the agent's markdown report.
 
 A record progresses on disk: `in_progress` → `completed`/… (clock_off) or
 `error`/`shutdown_sweep` (sweep); each step rewrites the file atomically.
+
+#### Worklog enrichment from traces (`worklog_enrich`)
+
+Worklogs are *self-reported*; the JSONL trajectory traces NeMo-Gym writes
+(`<output_dir>/<trace_dir_subpath>/<agent>/<session_id>.jsonl`) are *ground
+truth*. `nemo_skills.mcp.servers.agentic.worklog_enrich` joins them: for each
+session it derives the `task_id` from that trace's own `mcp_worklog_clock_in`
+event, reconstructs a factual tools-used table (`tool_start`/`tool_complete`),
+and writes a `## Tools used (observed)` block onto the matching `<task_id>.md`
+report plus a `<task_id>.tools.json` sidecar with a claim-vs-observed diff.
+
+The join needs **per-agent trace files** — orchestrator *and* delegate
+children. NeMo-Gym exposes a per-session `_trace_callback_factory` on the agent
+and hermes-agent's `delegate_tool` binds each child its own session-scoped trace
+callbacks, so every worker writes a standalone `<session_id>.jsonl` (no
+emit-time session juggling). Run it standalone over any run, or via
+`ns hermes_agent_rollouts --enrich_worklogs` (a gym-sentinel-gated post-step):
+
+```
+python -m nemo_skills.mcp.servers.agentic.worklog_enrich \
+    --trace-dir <output_dir>/traces --worklog-dir <output_dir>/worklogs
+```
 
 ### `batch_solve` & the benchmark trust boundary (P2)
 

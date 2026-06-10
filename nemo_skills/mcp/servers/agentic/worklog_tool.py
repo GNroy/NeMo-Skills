@@ -242,6 +242,32 @@ class WorklogTool(Tool):
                                 "didn't (incl. tool usefulness), and the final answer."
                             ),
                         },
+                        "tools_used": {
+                            "type": "array",
+                            "description": (
+                                "Optional structured self-assessment of the tools you used: "
+                                "one entry per tool. Lets downstream tooling compare what you "
+                                "say you used against what the trajectory trace observed."
+                            ),
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "name": {
+                                        "type": "string",
+                                        "description": "Tool name, e.g. mcp_benchmark_get_problem.",
+                                    },
+                                    "helped": {
+                                        "type": "boolean",
+                                        "description": "True if the tool helped, False if it was useless/broken.",
+                                    },
+                                    "note": {
+                                        "type": "string",
+                                        "description": "Short note on how the tool helped or why it didn't.",
+                                    },
+                                },
+                                "required": ["name"],
+                            },
+                        },
                     },
                     "required": ["task_id", "status"],
                 },
@@ -264,6 +290,7 @@ class WorklogTool(Tool):
                 status=args.get("status"),
                 report=args.get("report"),
                 agent_id=args.get("agent_id"),
+                tools_used=args.get("tools_used"),
             )
         return f"Error: unknown tool '{tool_name}'"
 
@@ -346,10 +373,12 @@ class WorklogTool(Tool):
         status: Any,
         report: Optional[str] = None,
         agent_id: Optional[str] = None,
+        tools_used: Optional[List[Dict[str, Any]]] = None,
     ) -> Dict[str, Any]:
         self._ensure_configured()
         task_id = self._require(task_id, "task_id")
         status = self._normalize_status(status)
+        tools_used = self._normalize_tools_used(tools_used)
 
         with self._lock:
             entry = self._open.pop(task_id, None)
@@ -388,6 +417,7 @@ class WorklogTool(Tool):
             elapsed_s=elapsed_s,
             description=description,
             report=report,
+            tools_used=tools_used,
         )
         with self._lock:
             self._closed.add(task_id)
@@ -421,6 +451,7 @@ class WorklogTool(Tool):
         elapsed_s: Optional[float],
         description: Optional[str],
         report: Optional[str],
+        tools_used: Optional[List[Dict[str, Any]]] = None,
     ) -> str:
         run_id = _safe_component(self._config["run_id"], fallback="run")
         base = Path(self._config["worklog_dir"]).expanduser() / run_id
@@ -445,6 +476,10 @@ class WorklogTool(Tool):
         }
         if description:
             frontmatter["task_description"] = description
+        if tools_used:
+            # Structured self-report (machine-readable). worklog_enrich diffs
+            # this against the trajectory-trace's observed tool calls.
+            frontmatter["tools_used"] = tools_used
 
         body = self._build_body(report, closed_by, description)
         fm_yaml = yaml.safe_dump(frontmatter, sort_keys=False, allow_unicode=True)
@@ -585,6 +620,34 @@ class WorklogTool(Tool):
         if not s:
             raise ValueError(f"{name} is required and must be a non-empty string")
         return s
+
+    @staticmethod
+    def _normalize_tools_used(tools_used: Any) -> Optional[List[Dict[str, Any]]]:
+        """Coerce the optional ``tools_used`` self-report into a clean list.
+
+        Lenient by design — a malformed self-report must never break clock_off
+        (the trajectory trace is the ground truth; this is a best-effort claim).
+        Accepts a list of dicts; each entry is reduced to ``name`` (required,
+        non-empty), optional ``helped`` (bool), optional ``note`` (str). Entries
+        without a usable name are dropped; a non-list returns ``None``.
+        """
+        if not tools_used or not isinstance(tools_used, (list, tuple)):
+            return None
+        out: List[Dict[str, Any]] = []
+        for item in tools_used:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name") or "").strip()
+            if not name:
+                continue
+            entry: Dict[str, Any] = {"name": name}
+            if "helped" in item and item["helped"] is not None:
+                entry["helped"] = bool(item["helped"])
+            note = item.get("note")
+            if note:
+                entry["note"] = str(note).strip()
+            out.append(entry)
+        return out or None
 
     @staticmethod
     def _normalize_status(status: Any) -> str:

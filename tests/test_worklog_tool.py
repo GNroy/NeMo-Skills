@@ -478,3 +478,53 @@ def test_w22_clock_in_writes_stub_over_stdio(tmp_path: Path) -> None:
     assert fm["status"] == STATUS_IN_PROGRESS
     assert fm["closed_by"] == CLOSED_BY_PENDING
     assert "IN PROGRESS" in body
+
+
+# ---------------------------------------------------------------------------
+# W23 / W24 / W25 — structured tools_used self-report (SCI-548 enrichment)
+# ---------------------------------------------------------------------------
+
+
+def test_w23_tools_used_lands_in_frontmatter(tmp_path: Path) -> None:
+    tool = _make_tool(tmp_path)
+    _run(tool.execute("clock_in", {"task_id": "tu1"}))
+    tools_used = [
+        {"name": "mcp_benchmark_get_problem", "helped": True, "note": "fetched the prompt"},
+        {"name": "mcp_worklog_clock_in", "helped": True},
+    ]
+    co = _run(
+        tool.execute(
+            "clock_off",
+            {"task_id": "tu1", "status": "completed", "report": "done", "tools_used": tools_used},
+        )
+    )
+    fm, _ = _parse_worklog(Path(co["report_path"]).read_text())
+    assert fm["tools_used"][0]["name"] == "mcp_benchmark_get_problem"
+    assert fm["tools_used"][0]["helped"] is True
+    assert fm["tools_used"][0]["note"] == "fetched the prompt"
+    # Optional fields omitted when not provided.
+    assert fm["tools_used"][1] == {"name": "mcp_worklog_clock_in", "helped": True}
+
+
+def test_w24_tools_used_omitted_when_absent(tmp_path: Path) -> None:
+    tool = _make_tool(tmp_path)
+    _run(tool.execute("clock_in", {"task_id": "tu2"}))
+    co = _run(tool.execute("clock_off", {"task_id": "tu2", "status": "completed", "report": "x"}))
+    fm, _ = _parse_worklog(Path(co["report_path"]).read_text())
+    assert "tools_used" not in fm  # no key when the agent didn't self-report
+
+
+def test_w25_tools_used_malformed_is_lenient(tmp_path: Path) -> None:
+    tool = _make_tool(tmp_path)
+    _run(tool.execute("clock_in", {"task_id": "tu3"}))
+    # Junk entries (no name, non-dict) are dropped; a clean entry survives;
+    # clock_off must NOT raise on a malformed self-report.
+    tools_used = ["not-a-dict", {"no_name": 1}, {"name": "  "}, {"name": "real_tool", "helped": "yes"}]
+    co = _run(
+        tool.execute(
+            "clock_off",
+            {"task_id": "tu3", "status": "completed", "report": "x", "tools_used": tools_used},
+        )
+    )
+    fm, _ = _parse_worklog(Path(co["report_path"]).read_text())
+    assert fm["tools_used"] == [{"name": "real_tool", "helped": True}]  # "yes" coerced to bool
