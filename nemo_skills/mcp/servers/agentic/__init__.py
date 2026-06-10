@@ -19,6 +19,8 @@ Tools in this package support the orchestrator + worker loop:
 
 - ``worklog_tool`` — clock-in / clock-off work tracking that writes a
   markdown report per task and *guarantees* a close even on crash/kill.
-
-Future siblings (P2+): ``benchmark_tool`` (load_benchmark / get_problem).
+- ``benchmark_tool`` — the answer-hiding trust boundary: ``load_benchmark``
+  (ids-only manifest, orchestrator side) + ``get_problem`` (one problem's
+  ``{id, prompt, modality}``, worker side; never the answer). Powers
+  ``batch_solve`` (Hermes-native ``delegate_task``) over a Gym benchmark.
 """

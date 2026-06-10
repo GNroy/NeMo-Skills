@@ -47,6 +47,7 @@ server.  Use the generic stdio wrapper `nemo_skills.mcp.stdio_serve`
 | `nemo_skills.mcp.servers.web.arxiv_tool:ArxivSearchTool` | arXiv search + paper metadata. |
 | `nemo_skills.mcp.servers.web.wikipedia_tool:WikipediaSearchTool` | Wikipedia search + article fetch. |
 | `nemo_skills.mcp.servers.agentic.worklog_tool:WorklogTool` | Clock-in/clock-off work tracking; writes a markdown report per task ([agentic loop](#agentic-loop-tools-sci-548)). |
+| `nemo_skills.mcp.servers.agentic.benchmark_tool:BenchmarkTool` | `load_benchmark` (ids manifest) / `get_problem` (one problem, no answers) — the answer-hiding trust boundary ([batch_solve](#batch_solve--the-benchmark-trust-boundary-p2)). |
 
 Hermes consumes them uniformly:
 
@@ -144,6 +145,62 @@ started_at, ended_at, elapsed_s`) followed by the agent's markdown report.
 
 A record progresses on disk: `in_progress` → `completed`/… (clock_off) or
 `error`/`shutdown_sweep` (sweep); each step rewrites the file atomically.
+
+### `batch_solve` & the benchmark trust boundary (P2)
+
+The self-improving swarm's `batch_solve` is **not new code** — it is Hermes'
+native `delegate_task` (toolset `delegation`): the orchestrator fans out one
+worker subagent per problem, and the returned per-child results *are* the
+status roster. The new NS code P2 adds is the **`benchmark` trust-boundary MCP
+server** — the boundary between raw benchmark data (which carries answers and
+grading config) and what any agent may see. Two tools, one server:
+
+- `load_benchmark(benchmark, limit, shuffle, seed, shard)` → **orchestrator
+  side**. Returns an ids-only manifest `{count, total, ids:[...]}` — no problem
+  text, no answers. Keeps the orchestrator's context `O(N ids)` so it scales
+  past a 128k window (workers fetch their own problems).
+- `get_problem(id)` → **worker side**. Returns exactly `{id, prompt, modality}`
+  and nothing else — never `expected_answer` / `reference_solution` /
+  `verifier_metadata`. The return is *constructed* by a whitelist, so a new
+  leaky column can't slip through; a tripwire re-checks against a denylist.
+
+Benchmark rows across Gym/NS are heterogeneous, so `id` and `prompt` are
+auto-detected (`id`/`uuid`/`hash_id`/… → fallback `row-<index>`; direct
+`problem`/`question` key → else the user turns of
+`responses_create_params.input`). `modality` is `"text"` unless an image/audio
+content part is present.
+
+Wire it as an `mcp_servers:` entry alongside `worklog`. The orchestrator
+manifest enables `delegation` + `mcp-benchmark` + `mcp-worklog`; delegate
+children inherit the MCP toolsets automatically (`delegation.inherit_mcp_toolsets`
+default True) and have `delegation`/`memory` stripped
+(`DELEGATE_BLOCKED_TOOLS`) — so workers structurally can't delegate or write
+memory, only fetch + solve + worklog. Example (see
+`NeMo-Skills/workdir-agents/validation/batch_solve_qwen_manifest.yaml` for the
+full rollout manifest + driving prompt):
+
+```yaml
+mcp_servers:
+  benchmark:
+    command: /usr/bin/python3       # or ns-mcp-serve
+    args: [-m, nemo_skills.mcp.stdio_serve, "nemo_skills.mcp.servers.agentic.benchmark_tool:BenchmarkTool"]
+    env:
+      NS_BENCHMARK_PATH: /path/to/prepared_benchmark.jsonl   # lazy-load fallback for workers
+```
+
+| Override / env | Default | Purpose |
+|---|---|---|
+| `benchmark_root` / `NS_BENCHMARK_ROOT` | `None` | Dir to resolve a bare benchmark *name* → `<root>/<name>.jsonl`. |
+| `benchmark_path` / `NS_BENCHMARK_PATH` | `None` | A single staged file so `get_problem` resolves without a prior `load_benchmark`. |
+| `id_keys` | `["id","uuid","hash_id","_id","problem_id","qid"]` | Row keys tried, in order, for the join id. |
+| `prompt_keys` | `["problem","question","prompt","text"]` | Row keys tried, in order, for the prompt. |
+
+**Offline grading joins by `id` (no new grader).** The answer fields stay in the
+staged JSONL, read only by the offline grader *after* the session ends. The
+join key is `benchmark_tool.derive_problem_id(row, index)` — exported and used
+by both the tool and any grader, so the answer↔response join always agrees.
+Existing Gym `verify` / `judge_rollouts.py` grade as today; pass-rate
+measurement across warm/cold iterations is P4.
 
 ### Adding a new wrapped tool
 
