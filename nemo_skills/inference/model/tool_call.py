@@ -33,6 +33,12 @@ from .base import BaseModel, EndpointType
 
 LOG = logging.getLogger(get_logger_name(__file__))
 
+# Used when force_final_answer is enabled and the tool loop ends without a final text answer.
+DEFAULT_FORCE_FINAL_ANSWER_PROMPT = (
+    "You can no longer use tools. Based on everything above, write your final answer now, "
+    "directly and in the exact format requested in the original question."
+)
+
 
 class ToolCallingWrapper:
     """
@@ -55,6 +61,8 @@ class ToolCallingWrapper:
         schema_overrides: dict | None = None,
         max_tool_calls: int = -1,
         max_tool_output_tokens: int = -1,
+        force_final_answer: bool = False,
+        force_final_answer_prompt: str = DEFAULT_FORCE_FINAL_ANSWER_PROMPT,
     ):
         self.model = model
         additional_config = additional_config or {}
@@ -70,6 +78,12 @@ class ToolCallingWrapper:
         self.schema_mappings = {}  # Built when tools are listed
         self.max_tool_calls = max_tool_calls
         self.max_tool_output_tokens = max_tool_output_tokens
+        # When the tool loop ends without a usable final text answer (tool-call-limit hit, or the
+        # model stops on an empty/tool-only turn), optionally do one extra tool-free generation that
+        # forces the model to commit to a final answer. Default-off, model-agnostic — addresses the
+        # broken-conversation case flagged in the loop below (no final answer -> judged wrong).
+        self.force_final_answer = force_final_answer
+        self.force_final_answer_prompt = force_final_answer_prompt
 
     async def _execute_tool_call(self, tool_call, request_id: str, endpoint_type: EndpointType):
         ## TODO(sanyamk): The correct key format needs to be cohesive with other formatters.
@@ -278,6 +292,7 @@ class ToolCallingWrapper:
         # assigning a unique request id to pass to tool calls if they need to be stateful
         request_id = str(uuid.uuid4())
         tool_calls_executed = 0
+        cap_reached = False
 
         # If tool_choice=required is set in extra_body, apply it only on the first turn.
         # Subsequent turns revert to "auto" so the model can produce a final text answer.
@@ -340,6 +355,7 @@ class ToolCallingWrapper:
                             self.max_tool_calls,
                         )
                         result_steps["finish_reason"].append("tool_call_limit_reached")
+                        cap_reached = True
                         break
 
                     tool_calls_output_messages = await self._execute_tool_calls(
@@ -358,8 +374,40 @@ class ToolCallingWrapper:
 
                 break
 
-            # TODO: currently if number of tool calls is reached, the final conversation
-            #       is "broken" (tool call, but not output). Not sure what's a better option, though
+            # If the loop ended without a usable final text answer (tool-call-limit hit, or the
+            # model stopped on an empty/tool-only turn) the final conversation is "broken" (ends on a
+            # tool call with no answer -> judged wrong). When enabled, do one extra tool-free turn that
+            # forces the model to commit to a final answer. Default-off and model-agnostic.
+            if self.force_final_answer:
+                last_assistant_content = ""
+                for _msg in reversed(conversation):
+                    if _msg.get("role") == "assistant":
+                        _c = _msg.get("content")
+                        last_assistant_content = _c if isinstance(_c, str) else ""
+                        break
+                if cap_reached or not last_assistant_content.strip():
+                    LOG.info("Forcing a final tool-free answer (cap_reached=%s).", cap_reached)
+                    conversation.append({"role": "user", "content": self.force_final_answer_prompt})
+                    forced_budget = (
+                        tokens_to_generate
+                        if isinstance(tokens_to_generate, int) and tokens_to_generate > 0
+                        else None
+                    )
+                    # Drop any tool_choice override so this turn is a plain answer; send no tools.
+                    _forced_extra_body = {k: v for k, v in _orig_extra_body.items() if k != 'tool_choice'}
+                    _forced_kwargs = {**generation_kwargs, 'extra_body': _forced_extra_body}
+                    forced = await self.model.generate_async(
+                        prompt=conversation,
+                        tools=None,
+                        tokens_to_generate=forced_budget,
+                        endpoint_type=endpoint_type,
+                        **_forced_kwargs,
+                    )
+                    for k in ["generation", "num_generated_tokens", "reasoning_content", "finish_reason"]:
+                        if k in forced:
+                            result_steps[k].append(forced[k])
+                    conversation.extend(self._duplicate_reasoning_content_keys(forced["serialized_output"]))
+                    result_steps["forced_final_answer"] = True
 
             result_steps["generation"] = "".join(result_steps["generation"])
             result_steps["num_generated_tokens"] = sum(result_steps["num_generated_tokens"])

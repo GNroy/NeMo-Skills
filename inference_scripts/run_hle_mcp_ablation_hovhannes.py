@@ -34,6 +34,7 @@ Usage:
 """
 
 import argparse
+import re
 import sys
 from pathlib import Path
 
@@ -88,6 +89,75 @@ AWS_CMH_NEMOTRON_SERVER_ARGS = (
     "--enable-auto-tool-choice "
     "--tool-call-parser qwen3_coder "
     "--max-num-seqs 128 "
+)
+# Nemotron-3-Ultra-550B-A55B-NVFP4 (hybrid Mamba/Transformer + LatentMoE,
+# ModelOpt NVFP4 weights).  Full-node TP=4 on one GB300 node (4x288 GB =
+# 1152 GB; NVFP4 weights ~275 GB fit with room for fp8 KV cache).  Args
+# follow NVIDIA's "AA low-latency" deployment recipe (kv fp8, mamba triton
+# backend, nemotron_v3 reasoning parser) — see docs_general/Nemotron.  The
+# checkpoint ships hf_quant_config.json so vLLM auto-detects the NVFP4
+# quantization; container nemo-skills-vllm-dc43f3e (vLLM 0.22.0) verified to
+# register NemotronHForCausalLM + modelopt_fp4 + the nemotron_v3 parser.
+AWS_CMH_NEMOTRON3_ULTRA_PATH = "/hf_models/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4"
+AWS_CMH_NEMOTRON3_ULTRA_CONTAINER = (
+    "/lustre/fsw/portfolios/nemotron/users/igitman/images/nemo-skills-vllm-dc43f3e.sqsh"
+)
+AWS_CMH_NEMOTRON3_ULTRA_SERVER_ARGS = (
+    "--tensor-parallel-size 4 "
+    "--pipeline-parallel-size 1 "
+    "--kv-cache-dtype fp8 "
+    "--max-model-len 262144 "
+    "--max-num-seqs 16 "
+    "--max-num-batched-tokens 16384 "
+    "--gpu-memory-utilization 0.9 "
+    "--enable-chunked-prefill "
+    "--enable-prefix-caching "
+    "--enable-flashinfer-autotune "
+    "--async-scheduling "
+    "--mamba-backend triton "
+    "--mamba-ssm-cache-dtype float32 "
+    "--trust-remote-code "
+    "--reasoning-parser nemotron_v3 "
+    "--enable-auto-tool-choice "
+    "--tool-call-parser qwen3_coder "
+    # MTP speculative decoding (model ships shared-weight MTP heads) — the
+    # purpose-built decode accelerator for this NVFP4 checkpoint.  JSON form
+    # per the HF model card; survives NS verbatim-interpolation like the
+    # model-loader-extra-config JSON below.
+    """--speculative-config '{"method": "nemotron_h_mtp", "num_speculative_tokens": 5}' """
+    """--model-loader-extra-config '{"enable_multithread_load": true, "num_threads": 96}' """
+)
+# Nemotron-3-Ultra NVFP4 on SGLang (speed A/B vs vLLM).  Container =
+# lmsysorg/sglang:v0.5.11 (the version NVIDIA validated for Ultra NVFP4+MTP),
+# imported to alaptev/containers.  NS serve_sglang FORCES --tensor-parallel-size
+# (=server_gpus) + --trust-remote-code + --model/--served-model-name/--host/
+# --port, so we pass only the extras.  Args follow the deployment doc's proven
+# "8xB200 NVFP4 + MTP" sbatch, adapted to one GB300 node (TP4 + EP4):
+#   --quantization modelopt_fp4 is REQUIRED for EP>1 (auto modelopt_mixed
+#   crashes in fused-MoE weight post-processing); NEXTN MTP needs
+#   --disable-radix-cache under mamba no_buffer.
+AWS_CMH_NEMOTRON3_ULTRA_SGLANG_CONTAINER = (
+    "/lustre/fsw/portfolios/nemotron/users/alaptev/containers/sglang-v0.5.11.sqsh"
+)
+AWS_CMH_NEMOTRON3_ULTRA_SGLANG_SERVER_ARGS = (
+    "--quantization modelopt_fp4 "
+    "--expert-parallel-size 4 "
+    "--kv-cache-dtype fp8_e4m3 "
+    "--context-length 262144 "
+    "--mem-fraction-static 0.85 "
+    "--chunked-prefill-size 16384 "
+    "--mamba-scheduler-strategy no_buffer "  # extra_buffer is rejected for NemotronH
+    "--disable-piecewise-cuda-graph "
+    "--disable-radix-cache "
+    # EAGLE 5/5 per NVIDIA's Nemotron-3-Super deployment guide (same MTP arch;
+    # reported accept-len ~3.45) — deeper than the NEXTN 3/4 first try
+    # (accept-len 3.1).  spec-v2 is default-on for EAGLE in v0.5.11.
+    "--speculative-algorithm EAGLE "
+    "--speculative-num-steps 5 "
+    "--speculative-eagle-topk 1 "
+    "--speculative-num-draft-tokens 5 "
+    "--reasoning-parser nemotron_3 "
+    "--tool-call-parser qwen3_coder "
 )
 AWS_CMH_GPTOSS_SERVER_ARGS = (
     "--async-scheduling "
@@ -261,7 +331,7 @@ AWS_CMH_KIMI_K26_CONTAINER = (
 # file under ~/workspace/mcp/experiments/experiments_v12/ that has been
 # rsynced to lustre is reachable here.
 KIMI_K26_TOOL_PARSER_PLUGIN = (
-    "/lustre/fsw/portfolios/nemotron/users/alaptev/reasoning_parsers/kimi_k26_tool_parser.py"
+    "/alaptev/reasoning_parsers/kimi_k26_tool_parser.py"
 )
 AWS_CMH_KIMI_K26_SERVER_ARGS = (
     # Aleksandr's actual working recipe (from his minimal sbatch in
@@ -283,9 +353,9 @@ AWS_CMH_KIMI_K26_SERVER_ARGS = (
     # Custom K2.6 tool-call parser (the stock kimi_k2 regex doesn't match
     # K2.6's emit order).  Plugin lives at our /workspace mount, copied
     # from alaptev's reasoning_parsers/ portfolio.
-    "--tool-parser-plugin /lustre/fsw/portfolios/nemotron/users/alaptev/reasoning_parsers/kimi_k26_tool_parser.py "
+    "--tool-parser-plugin /alaptev/reasoning_parsers/kimi_k26_tool_parser.py "
     "--tool-call-parser kimi_k26 "
-    "--reasoning-parser-plugin /lustre/fsw/portfolios/nemotron/users/alaptev/reasoning_parsers/kimi_k26_reasoning_parser.py "
+    "--reasoning-parser-plugin /alaptev/reasoning_parsers/kimi_k26_reasoning_parser.py "
     "--reasoning-parser kimi_k26 "
     # Aggressive multi-thread loader: 192 threads (vs 96) cuts the 64-
     # shard weight load from ~6.5 min to ~3 min on lustre.
@@ -323,7 +393,7 @@ AWS_IAD_KIMI_K26_SERVER_ARGS = (
     # prompts emits mid-stream and multiple <think> blocks; the stock
     # parser leaves them in the visible response → judge scores noise.
     # Aleksandr's `kimi_k26` shim does multi-block regex extraction.
-    "--reasoning-parser-plugin /lustre/fsw/portfolios/nemotron/users/alaptev/reasoning_parsers/kimi_k26_reasoning_parser.py "
+    "--reasoning-parser-plugin /alaptev/reasoning_parsers/kimi_k26_reasoning_parser.py "
     "--reasoning-parser kimi_k26 "
     # Throughput knobs (r19 ran at 211 tok/s = 127h ETA with the old
     # max-num-seqs 64; KV cache was only 72% full, indicating headroom):
@@ -379,6 +449,34 @@ MODEL_CONFIGS = {
         "thinking_args": "++chat_template_kwargs.enable_thinking=True ",
         "inference_args_no_tool": "++inference.temperature=1.0 ++inference.top_p=0.95 ++inference.tokens_to_generate=131072 ",
         "inference_args_tool": "++inference.temperature=1.0 ++inference.top_p=0.95 ++inference.tokens_to_generate=80000 ",
+        "judge": "gpt-oss",
+    },
+    "nemotron3_ultra": {
+        "label": "Nemotron-3-Ultra-550B-A55B-NVFP4",
+        "short": "nem3ultra",
+        "path": AWS_CMH_NEMOTRON3_ULTRA_PATH,
+        "server_type": "vllm",
+        "server_gpus": 4,
+        "server_nodes": 1,
+        "server_args": AWS_CMH_NEMOTRON3_ULTRA_SERVER_ARGS,
+        "server_container": AWS_CMH_NEMOTRON3_ULTRA_CONTAINER,
+        "thinking_args": "++chat_template_kwargs.enable_thinking=True ",
+        "inference_args_no_tool": "++inference.temperature=1.0 ++inference.top_p=0.95 ++inference.tokens_to_generate=250000 ",
+        "inference_args_tool": "++inference.temperature=1.0 ++inference.top_p=0.95 ++inference.tokens_to_generate=250000 ",
+        "judge": "gpt-oss",
+    },
+    "nemotron3_ultra_sglang": {
+        "label": "Nemotron-3-Ultra-550B-A55B-NVFP4 (SGLang)",
+        "short": "nem3ultrasgl",
+        "path": AWS_CMH_NEMOTRON3_ULTRA_PATH,
+        "server_type": "sglang",
+        "server_gpus": 4,
+        "server_nodes": 1,
+        "server_args": AWS_CMH_NEMOTRON3_ULTRA_SGLANG_SERVER_ARGS,
+        "server_container": AWS_CMH_NEMOTRON3_ULTRA_SGLANG_CONTAINER,
+        "thinking_args": "++chat_template_kwargs.enable_thinking=True ",
+        "inference_args_no_tool": "++inference.temperature=1.0 ++inference.top_p=0.95 ++inference.tokens_to_generate=250000 ",
+        "inference_args_tool": "++inference.temperature=1.0 ++inference.top_p=0.95 ++inference.tokens_to_generate=250000 ",
         "judge": "gpt-oss",
     },
     "nemotron_nano": {
@@ -940,6 +1038,26 @@ ARMS = [
         ),
         "num_chunks": 10,
     },
+    # ── Moonshot-hypothesis arm (added 2026-06-04): code + LIVE web search ──
+    # Tests whether tools HELP once the model has search (not python-only).
+    # Uses the in-repo live WikipediaSearchTool (REST/MediaWiki API, no key,
+    # needs internet — aws-cmh compute nodes have it). No local index / bm25s
+    # needed, so no install. Pair with --context-strategy blank to mimic
+    # Moonshot's "retain only the most recent tool round" context management.
+    {
+        "key": "python+wikisearch",
+        "desc": "+ PythonTool + WikipediaSearchTool (live web search)",
+        "extra_args": _tool_modules(
+            _PYTHON,
+            "nemo_skills.mcp.servers.web.wikipedia_tool::WikipediaSearchTool",
+            max_tool_calls=50,
+        ),
+        "prompt_config": None,
+        "sandbox": True,
+        "use_tool_inference": True,
+        "install": None,
+        "num_chunks": 10,
+    },
 ]
 
 # Canonical arm-index quintet used by run_canonical_sweep.sh — 5 arms per
@@ -1184,6 +1302,17 @@ def main():
     ap.add_argument("--split", default=SPLIT)
     ap.add_argument("--num-chunks", type=int, default=None)
     ap.add_argument(
+        "--num-jobs",
+        type=int,
+        default=None,
+        help=(
+            "Number of parallel SLURM jobs to spread the (seed x chunk) eval "
+            "units across.  Defaults to --num-chunks (legacy coupling).  With "
+            "the default single chunk, set --num-jobs=<#seeds> to get one model "
+            "server per seed (e.g. --seeds 5 --num-jobs 5 -> 5 generation jobs)."
+        ),
+    )
+    ap.add_argument(
         "--context-strategy",
         choices=["none", "drop", "blank", "summary"],
         default="none",
@@ -1209,6 +1338,15 @@ def main():
         type=int,
         default=None,
         help="Override ++max_samples for smoke runs.",
+    )
+    ap.add_argument(
+        "--max-tool-calls",
+        type=int,
+        default=None,
+        help=(
+            "Override ++max_tool_calls for tool arms (default per-arm is 50). "
+            "Used to study/curb tool-call spirals in the python-degradation work."
+        ),
     )
     ap.add_argument(
         "--server-args-extra",
@@ -1299,6 +1437,7 @@ def main():
             print(f"    slurm name: {job_prefix}{_expname(model_short, arm['key'], run_id, ctx_tag)}")
             print(f"    output_dir: {_output_dir(model_short, arm['key'], run_id, ctx_tag)}")
             print(f"    chunks:     {args.num_chunks if args.num_chunks is not None else arm.get('num_chunks', 1)}")
+            print(f"    jobs:       {args.num_jobs if args.num_jobs is not None else (args.num_chunks if args.num_chunks is not None else arm.get('num_jobs', arm.get('num_chunks', 1)))}")
         print(f"\n[DRY RUN] Would submit {len(arm_indices)} eval job(s) — exiting.\n")
         return
 
@@ -1360,6 +1499,16 @@ def main():
             + ctx_server_extra
             + (args.server_extra.strip() + " " if args.server_extra.strip() else "")
         )
+        # Optional max_tool_calls override (replaces the per-arm default set via _tool_modules).
+        # Default None -> no change, so other users of this harness are unaffected. Use a targeted
+        # regex (not the shlex helper) so the ++tool_modules=[...] list's quotes are left intact.
+        if args.max_tool_calls is not None and arm["use_tool_inference"]:
+            if re.search(r"\+\+max_tool_calls=\S+", all_extra_args):
+                all_extra_args = re.sub(
+                    r"\+\+max_tool_calls=\S+", f"++max_tool_calls={args.max_tool_calls}", all_extra_args
+                )
+            else:
+                all_extra_args += f"++max_tool_calls={args.max_tool_calls} "
 
         # Common eval kwargs (independent of whether we spawn our own
         # server or point at an external one).
@@ -1374,7 +1523,13 @@ def main():
             output_dir=odir,
             with_sandbox=arm["sandbox"],
             num_chunks=(args.num_chunks if args.num_chunks is not None else arm.get("num_chunks", 1)),
-            num_jobs=(args.num_chunks if args.num_chunks is not None else arm.get("num_jobs", arm.get("num_chunks", 1))),
+            num_jobs=(
+                args.num_jobs
+                if args.num_jobs is not None
+                else args.num_chunks
+                if args.num_chunks is not None
+                else arm.get("num_jobs", arm.get("num_chunks", 1))
+            ),
             judge_model=judge_cfg["judge_model"],
             exclusive=verdict.exclusive,
         )

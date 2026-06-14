@@ -204,6 +204,12 @@ class GenerationTaskConfig:
     max_tool_calls: int = -1  # If >= 0, will limit the number of tool calls executed during generation to this number
     max_tool_output_tokens: int = -1  # If >= 0, truncate each tool result to this many tokens (tail kept; ~4 chars/token)
 
+    # If True, when the tool loop ends without a final text answer (tool-call-limit hit, or the model
+    # stops on an empty/tool-only turn), do one extra tool-free generation that forces a final answer.
+    # Recovers the no-final-answer artifact that makes tool-augmented runs score worse. Default-off.
+    force_final_answer: bool = False
+    force_final_answer_prompt: str | None = None  # None -> use the wrapper default prompt
+
     # if True, will move full generation to _full_generation key and keep cfg.generation_key without thinking tokens
     # IMPORTANT: do not set this for non-reasoning models as it will make the generations empty!
     parse_reasoning: bool = False
@@ -491,6 +497,8 @@ class GenerationTask:
                 schema_overrides=self.cfg.schema_overrides,
                 max_tool_calls=self.cfg.max_tool_calls,
                 max_tool_output_tokens=self.cfg.max_tool_output_tokens,
+                force_final_answer=self.cfg.force_final_answer,
+                force_final_answer_prompt=self.cfg.force_final_answer_prompt,
                 tokenizer=self.tokenizer,
                 require_tokenizer=self.cfg.inference.tokens_to_generate is not None,
                 additional_config={"sandbox": self.cfg.sandbox},

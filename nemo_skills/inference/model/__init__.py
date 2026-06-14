@@ -137,10 +137,15 @@ def get_tool_calling_model(
     schema_overrides: dict | None = None,
     max_tool_calls: int = -1,
     max_tool_output_tokens: int = -1,
+    force_final_answer: bool = False,
+    force_final_answer_prompt: str | None = None,
     **kwargs,
 ):
     if isinstance(model, str):
         model = get_model(model=model, tokenizer=tokenizer, **kwargs)
+    wrapper_kwargs = {}
+    if force_final_answer_prompt is not None:
+        wrapper_kwargs["force_final_answer_prompt"] = force_final_answer_prompt
     return ToolCallingWrapper(
         model,
         tool_modules=tool_modules,
@@ -149,6 +154,8 @@ def get_tool_calling_model(
         schema_overrides=schema_overrides,
         max_tool_calls=max_tool_calls,
         max_tool_output_tokens=max_tool_output_tokens,
+        force_final_answer=force_final_answer,
+        **wrapper_kwargs,
     )
 
 
