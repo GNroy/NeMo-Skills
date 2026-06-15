@@ -290,8 +290,9 @@ def test_b10_multimodal_modality(tmp_path: Path) -> None:
 def test_b11_list_tools_shape() -> None:
     tool = _make_tool()
     entries = {e["name"]: e for e in _run(tool.list_tools())}
-    assert set(entries) == {"load_benchmark", "get_problem"}
+    assert set(entries) == {"load_benchmark", "plan_batch", "get_problem"}
     assert entries["load_benchmark"]["input_schema"]["required"] == ["benchmark"]
+    assert entries["plan_batch"]["input_schema"]["required"] == ["benchmark"]
     assert entries["get_problem"]["input_schema"]["required"] == ["id"]
 
 
@@ -304,7 +305,7 @@ def test_b12_composes_under_tool_manager(tmp_path: Path) -> None:
         overrides={"BenchmarkTool": {"benchmark_path": str(f)}},
     )
     listed = _run(mgr.list_all_tools())
-    assert sorted(t["name"] for t in listed) == ["get_problem", "load_benchmark"]
+    assert sorted(t["name"] for t in listed) == ["get_problem", "load_benchmark", "plan_batch"]
     man = _run(mgr.execute_tool("load_benchmark", {"benchmark": str(f)}))
     assert man["ids"] == ["p1"]
     prob = _run(mgr.execute_tool("get_problem", {"id": "p1"}))
@@ -376,7 +377,7 @@ async def _list_over_stdio(overrides: Dict[str, Any]):
 def test_b16_list_tools_over_stdio(tmp_path: Path) -> None:
     f = _write_jsonl(tmp_path / "s.jsonl", [{"id": "p1", "question": "q1"}])
     listed = asyncio.run(_list_over_stdio({"benchmark_path": str(f)}))
-    assert sorted(t.name for t in listed.tools) == ["get_problem", "load_benchmark"]
+    assert sorted(t.name for t in listed.tools) == ["get_problem", "load_benchmark", "plan_batch"]
 
 
 async def _roundtrip_over_stdio(overrides: Dict[str, Any], path: str):
@@ -398,3 +399,51 @@ def test_b17_load_and_get_over_stdio(tmp_path: Path) -> None:
     assert prob["prompt"].startswith("What is 2+2?")
     # The answer never crossed the boundary, even over the wire.
     assert "expected_answer" not in man_text and "expected_answer" not in prob_text
+
+
+# ---------------------------------------------------------------------------
+# B18 / B19 / B20 — plan_batch: staged work-list + trust boundary + sharding
+# ---------------------------------------------------------------------------
+
+
+def test_b18_plan_batch_writes_worklist_and_returns_receipt(tmp_path: Path) -> None:
+    f = _write_jsonl(tmp_path / "gpqa.jsonl", GPQA_ROWS)
+    plan_dir = tmp_path / "plans"
+    tool = _make_tool(plan_dir=str(plan_dir))
+    receipt = _run(
+        tool.execute(
+            "plan_batch",
+            {"benchmark": str(f), "goal_template": "Do '{id}' now."},
+        )
+    )
+    # Receipt is a small constant-size handle — NOT the ids or any text/answers.
+    assert receipt["count"] == 2
+    assert "ids" not in receipt
+    blob = json.dumps(receipt)
+    assert "2+2" not in blob and "expected_answer" not in blob and '"B"' not in blob
+    # The staged file is JSONL of {goal} with {id} substituted, no answers.
+    lines = Path(receipt["handle"]).read_text().strip().splitlines()
+    tasks = [json.loads(l) for l in lines]
+    assert [t["goal"] for t in tasks] == ["Do 'u-aaa' now.", "Do 'u-bbb' now."]
+    file_blob = "\n".join(lines)
+    assert "expected_answer" not in file_blob and "2+2" not in file_blob
+
+
+def test_b19_plan_batch_default_template_and_shard(tmp_path: Path) -> None:
+    rows = [{"id": f"p{i}", "question": f"q{i}"} for i in range(6)]
+    f = _write_jsonl(tmp_path / "b.jsonl", rows)
+    tool = _make_tool(plan_dir=str(tmp_path / "plans"))
+    # shard 2/3 of 6 contiguous ids -> p2, p3
+    receipt = _run(tool.execute("plan_batch", {"benchmark": str(f), "shard": "2/3"}))
+    assert receipt["count"] == 2
+    tasks = [json.loads(l) for l in Path(receipt["handle"]).read_text().strip().splitlines()]
+    # Default template fetches by id and asks for a Final Answer line.
+    assert all("get_problem('p" in t["goal"] and "Final Answer:" in t["goal"] for t in tasks)
+    assert "p2" in tasks[0]["goal"] and "p3" in tasks[1]["goal"]
+
+
+def test_b20_plan_batch_rejects_template_without_id(tmp_path: Path) -> None:
+    f = _write_jsonl(tmp_path / "b.jsonl", [{"id": "p1", "question": "q1"}])
+    tool = _make_tool(plan_dir=str(tmp_path / "plans"))
+    with pytest.raises(ValueError, match=r"\{id\}"):
+        _run(tool.execute("plan_batch", {"benchmark": str(f), "goal_template": "no placeholder"}))

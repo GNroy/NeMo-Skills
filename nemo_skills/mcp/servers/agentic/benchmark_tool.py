@@ -22,7 +22,7 @@ problem (``delegate_task``), and grades offline. Loading is therefore a
 benchmark data — which carries the answers and grading config — and what any
 agent (orchestrator or worker) is ever allowed to see.
 
-Two tools, split so the orchestrator never holds problem content (§10/§11 of
+Three tools, split so the orchestrator never holds problem content (§10/§11 of
 the design doc):
 
 - ``load_benchmark(benchmark, limit, shuffle, seed, shard)`` — **orchestrator
@@ -31,6 +31,16 @@ the design doc):
   per id (*"solve <id>; call get_problem('<id>')"*) so its context stays
   ``O(N ids)`` regardless of problem size — the key to scaling past a 128k
   window (HLE-scale).
+- ``plan_batch(benchmark, goal_template, limit, shuffle, seed, shard)`` —
+  **orchestrator side, large-batch path**. Expands the (sharded/sampled)
+  benchmark into a staged JSONL *work-list file* (one ``delegate_task`` goal per
+  id, built from ``goal_template`` with ``{id}`` substituted) and returns a
+  small ``{handle, count, ...}`` receipt — NOT the ids, never answers. The
+  orchestrator hands the ``handle`` straight to
+  ``delegate_task(tasks_source=handle, max_in_flight=N)`` and dispatches the
+  WHOLE set in one call, so it never has to *generate* (or even hold) thousands
+  of goal strings — context stays ``O(1)`` in the batch size. Reuses the same
+  id derivation + sharding as ``load_benchmark`` so plan/load/grade agree.
 - ``get_problem(id)`` — **worker side**. Returns one problem's *perceivable*
   content ``{id, prompt, modality}`` and nothing else. Inherited by
   ``delegate_task`` children as an ``mcp-*`` toolset, so each worker pulls its
@@ -73,6 +83,10 @@ key                 env fallback                 default
                                                  ``load_benchmark``)
 ``id_keys``         ``-``                        ``["id","uuid","hash_id","_id","problem_id","qid"]``
 ``prompt_keys``     ``-``                        ``["problem","question","prompt","text"]``
+``plan_dir``        ``NS_BATCH_PLAN_DIR``        ``None`` (then parent of ``NS_WORKLOG_DIR``, i.e.
+                                                 the run output_dir; ``plan_batch`` writes its
+                                                 work-list files here — must be a mount the
+                                                 orchestrator can also read)
 ==================  ===========================  ==========================================
 
 One MCP server process serves the orchestrator *and* every delegate worker
@@ -86,6 +100,7 @@ import json
 import logging
 import os
 import random
+import re
 import threading
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -96,6 +111,15 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_ID_KEYS = ("id", "uuid", "hash_id", "_id", "problem_id", "qid")
 DEFAULT_PROMPT_KEYS = ("problem", "question", "prompt", "text")
+
+# Default per-task goal for plan_batch when the orchestrator gives none. Mirrors
+# the worker contract used by load_benchmark's manifest: fetch the problem by id,
+# solve it, and commit a single 'Final Answer:' line the grader can join on.
+_DEFAULT_GOAL_TEMPLATE = (
+    "Solve benchmark problem '{id}'. Call get_problem('{id}') to retrieve the "
+    "problem text, solve it, and end your report with a single line "
+    "'Final Answer: <your answer>'. Do not use any other tools."
+)
 
 # Fields that carry the answer or grading config. NEVER returned to any agent.
 # The whitelist construction already excludes them; this is the defence-in-depth
@@ -145,6 +169,10 @@ class BenchmarkTool(Tool):
             "benchmark_path": None,
             "id_keys": None,
             "prompt_keys": None,
+            # Directory the plan_batch work-list files are written to. Must be on
+            # a filesystem the orchestrator (which reads the handle via
+            # delegate_task) can also see — defaults to the worklog output dir.
+            "plan_dir": None,
         }
         self._configured = False
         self._lock = threading.RLock()
@@ -168,6 +196,7 @@ class BenchmarkTool(Tool):
         cfg["benchmark_path"] = cfg.get("benchmark_path") or os.environ.get("NS_BENCHMARK_PATH")
         cfg["id_keys"] = tuple(cfg.get("id_keys") or DEFAULT_ID_KEYS)
         cfg["prompt_keys"] = tuple(cfg.get("prompt_keys") or DEFAULT_PROMPT_KEYS)
+        cfg["plan_dir"] = cfg.get("plan_dir") or os.environ.get("NS_BATCH_PLAN_DIR")
 
         self._config = cfg
         self._configured = True
@@ -214,6 +243,58 @@ class BenchmarkTool(Tool):
                 },
             },
             {
+                "name": "plan_batch",
+                "description": (
+                    "ORCHESTRATOR tool. Expand a benchmark (optionally sharded/sampled) into a "
+                    "staged work-list FILE and return {handle, count, benchmark, shard} — a small "
+                    "constant-size receipt, NOT the ids or problem text. Each line of the file is "
+                    "one delegate_task goal built from your goal_template with '{id}' substituted "
+                    "(the worker then calls get_problem('<id>') and solves it). Hand the returned "
+                    "'handle' to delegate_task(tasks_source=handle, max_in_flight=N) to dispatch "
+                    "the whole set in ONE call WITHOUT enumerating thousands of goals in your "
+                    "context. No answers ever touch the file. Use this instead of load_benchmark "
+                    "+ a hand-built tasks array for anything but a tiny batch."
+                ),
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "benchmark": {
+                            "type": "string",
+                            "description": (
+                                "Benchmark name (resolved under benchmark_root) or a path to a "
+                                "prepared .jsonl file."
+                            ),
+                        },
+                        "goal_template": {
+                            "type": "string",
+                            "description": (
+                                "Per-task goal string with a literal '{id}' placeholder, e.g. "
+                                "\"Solve problem '{id}': call get_problem('{id}'), solve it, and "
+                                "end with a line 'Final Answer: <answer>'.\". '{id}' is replaced "
+                                "with each problem id. If omitted, a sensible default is used."
+                            ),
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "description": "Optional cap on number of tasks (applied after shuffle/shard).",
+                        },
+                        "shuffle": {
+                            "type": "boolean",
+                            "description": "Shuffle ids before limit/shard (deterministic with seed). Default false.",
+                        },
+                        "seed": {
+                            "type": "integer",
+                            "description": "Seed for the shuffle/sample, for reproducibility.",
+                        },
+                        "shard": {
+                            "type": "string",
+                            "description": "Optional 'i/n' (1-based) to take shard i of n contiguous splits.",
+                        },
+                    },
+                    "required": ["benchmark"],
+                },
+            },
+            {
                 "name": "get_problem",
                 "description": (
                     "WORKER tool. Fetch ONE problem's content by id: returns {id, prompt, "
@@ -240,6 +321,15 @@ class BenchmarkTool(Tool):
         if tool_name == "load_benchmark":
             return self._load_benchmark(
                 benchmark=args.get("benchmark"),
+                limit=args.get("limit"),
+                shuffle=bool(args.get("shuffle", False)),
+                seed=args.get("seed"),
+                shard=args.get("shard"),
+            )
+        if tool_name == "plan_batch":
+            return self._plan_batch(
+                benchmark=args.get("benchmark"),
+                goal_template=args.get("goal_template"),
                 limit=args.get("limit"),
                 shuffle=bool(args.get("shuffle", False)),
                 seed=args.get("seed"),
@@ -290,6 +380,65 @@ class BenchmarkTool(Tool):
             "ids": ids,
             "selected_from": total_after_shard,
         }
+
+    def _plan_batch(
+        self,
+        benchmark: Any,
+        goal_template: Optional[str] = None,
+        limit: Optional[int] = None,
+        shuffle: bool = False,
+        seed: Optional[int] = None,
+        shard: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Expand a (sharded/sampled) benchmark into a staged JSONL work-list and
+        return a small handle receipt. Reuses ``_load_benchmark`` for id derivation
+        and sharding so plan/load/grade all agree on ids. The file holds only
+        templated goal strings + non-sensitive ids — never answers."""
+        manifest = self._load_benchmark(
+            benchmark=benchmark, limit=limit, shuffle=shuffle, seed=seed, shard=shard
+        )
+        ids = manifest["ids"]
+        template = goal_template if (isinstance(goal_template, str) and goal_template.strip()) else _DEFAULT_GOAL_TEMPLATE
+        if "{id}" not in template:
+            raise ValueError("goal_template must contain the literal '{id}' placeholder.")
+
+        out_path = self._resolve_plan_path(manifest["benchmark"], shard)
+        n = 0
+        with out_path.open("w", encoding="utf-8") as fh:
+            for pid in ids:
+                # Only {id} is substituted; any other braces in the template are
+                # left intact (str.replace, not str.format, so worker code
+                # snippets with their own braces survive).
+                goal = template.replace("{id}", str(pid))
+                fh.write(json.dumps({"goal": goal}) + "\n")
+                n += 1
+
+        return {
+            "handle": str(out_path),
+            "count": n,
+            "benchmark": manifest["benchmark"],
+            "shard": shard,
+            "selected_from": manifest["selected_from"],
+            "total": manifest["total"],
+        }
+
+    def _resolve_plan_path(self, benchmark_name: str, shard: Optional[str]) -> Path:
+        """Pick a directory both this MCP server and the orchestrator can read.
+
+        Priority: configured plan_dir / NS_BATCH_PLAN_DIR -> the parent of
+        NS_WORKLOG_DIR (the run's output_dir, already a shared mount) -> cwd."""
+        plan_dir = self._config.get("plan_dir")
+        if not plan_dir:
+            worklog_dir = os.environ.get("NS_WORKLOG_DIR")
+            if worklog_dir:
+                # NS_WORKLOG_DIR is "{output_dir}/worklogs"; stage plans beside it.
+                plan_dir = os.path.join(os.path.dirname(worklog_dir.rstrip("/")), "batch_plans")
+            else:
+                plan_dir = os.path.join(os.getcwd(), "batch_plans")
+        Path(plan_dir).mkdir(parents=True, exist_ok=True)
+        safe_bench = re.sub(r"[^A-Za-z0-9._-]", "_", os.path.basename(str(benchmark_name)))
+        safe_shard = re.sub(r"[^A-Za-z0-9]", "-", str(shard)) if shard else "all"
+        return Path(plan_dir) / f"plan_{safe_bench}_{safe_shard}.jsonl"
 
     def _get_problem(self, id: Any) -> Dict[str, Any]:
         self._ensure_configured()
