@@ -28,6 +28,7 @@ class SupportedServersSelfHosted(str, Enum):
     vllm_dp_ray = "vllm_dp_ray"
     vllm_multimodal = "vllm_multimodal"
     sglang = "sglang"
+    sglang_router = "sglang_router"
     megatron = "megatron"
     generic = "generic"
 
@@ -38,6 +39,7 @@ class SupportedServers(str, Enum):
     vllm_dp_ray = "vllm_dp_ray"
     vllm_multimodal = "vllm_multimodal"
     sglang = "sglang"
+    sglang_router = "sglang_router"
     megatron = "megatron"
     openai = "openai"
     azureopenai = "azureopenai"
@@ -56,9 +58,12 @@ def get_free_port(exclude: list[int] | None = None, strategy: int | str = 5000) 
     elif strategy == "random":
         import random
 
-        port = random.randint(1024, 65535)
+        # Upper bound 55000 (not 65535) leaves headroom for servers that derive
+        # an internal port by offset — e.g. SGLang v0.5.11 uses server_port +
+        # 10000 for its gRPC port and rejects anything > 65535 at arg-parse time.
+        port = random.randint(1024, 55000)
         while port in exclude:
-            port = random.randint(1024, 65535)
+            port = random.randint(1024, 55000)
         return port
     else:
         raise ValueError(f"Strategy {strategy} not supported.")
@@ -240,7 +245,7 @@ def get_server_command(
 
     # check if the model path is mounted if not vllm, sglang, or trtllm;
     # vllm, sglang, trtllm can also pass model name as "model_path" so we need special processing
-    if server_type not in ["vllm", "vllm_dp_ray", "vllm_multimodal", "sglang", "trtllm", "generic"]:
+    if server_type not in ["vllm", "vllm_dp_ray", "vllm_multimodal", "sglang", "sglang_router", "trtllm", "generic"]:
         check_if_mounted(cluster_config, model_path)
 
     # the model path will be mounted, so generally it will start with /
@@ -328,6 +333,21 @@ def get_server_command(
             f"    --num_nodes {num_nodes} "
             f"    --port {server_port} "
             f"    {multinode_args} "
+            f"    {server_args} "
+        )
+        num_tasks = 1
+    elif server_type == "sglang_router":
+        # DP pool of single-node SGLang workers (one per node) behind one
+        # sglang_router endpoint on the het-group master. num_nodes = #replicas.
+        # ntasks-per-node=1 (num_tasks=1) -> one worker task per node; rank 0
+        # also runs the router. No Ray / cross-node parallelism.
+        server_entrypoint = server_entrypoint or "-m nemo_skills.inference.server.serve_sglang_router"
+        server_start_cmd = (
+            f"python3 {server_entrypoint} "
+            f"    --model {model_path} "
+            f"    --num_gpus {num_gpus} "
+            f"    --num_nodes {num_nodes} "
+            f"    --port {server_port} "
             f"    {server_args} "
         )
         num_tasks = 1

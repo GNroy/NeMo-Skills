@@ -306,10 +306,17 @@ def get_executor(
 
     if not heterogeneous:
         env_vars["SLURM_MASTER_NODE"] = "$(scontrol show hostnames $SLURM_JOB_NODELIST | head -n1)"
+        # full (space-separated) host list of this allocation, expanded host-side
+        # (scontrol is absent in serving containers); used by sglang_router workers.
+        env_vars["SLURM_GROUP_NODES"] = "$(scontrol show hostnames $SLURM_JOB_NODELIST | tr '\\n' ' ')"
     else:
         # master node will be within the same group
         env_vars["SLURM_MASTER_NODE"] = (
             f"$(scontrol show hostnames $SLURM_JOB_NODELIST_HET_GROUP_{het_group} | head -n1)"
+        )
+        # full host list of THIS het-group (space-separated), expanded host-side.
+        env_vars["SLURM_GROUP_NODES"] = (
+            f"$(scontrol show hostnames $SLURM_JOB_NODELIST_HET_GROUP_{het_group} | tr '\\n' ' ')"
         )
         # in addition defining master nodes for all groups to allow communication
         for group in range(total_het_groups):
