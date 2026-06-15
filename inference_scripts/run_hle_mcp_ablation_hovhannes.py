@@ -1058,6 +1058,24 @@ ARMS = [
         "install": None,
         "num_chunks": 10,
     },
+    # Live arXiv + Wikipedia retrieval baseline (SCI-575 web-search direction). Both are in-process
+    # Tool classes hitting export.arxiv.org / wikipedia.org; no API key, deps (httpx) already in image,
+    # compute nodes have egress. Paired with the python-degradation discipline (cap=8 + run-flag
+    # force_final_answer + timeout=60) so search/read/compute spirals still resolve to a final answer.
+    {
+        "key": "python+arxiv-wiki-live",
+        "desc": "+ PythonTool + live arXiv + live Wikipedia search (no API key; compute-node egress)",
+        "extra_args": _tool_modules(
+            _PYTHON,
+            "nemo_skills.mcp.servers.web.arxiv_tool::ArxivSearchTool",
+            "nemo_skills.mcp.servers.web.wikipedia_tool::WikipediaSearchTool",
+            max_tool_calls=8,
+        ),
+        "prompt_config": None,
+        "sandbox": True,
+        "use_tool_inference": True,
+        "install": None,
+    },
 ]
 
 # Canonical arm-index quintet used by run_canonical_sweep.sh — 5 arms per
@@ -1349,6 +1367,24 @@ def main():
         ),
     )
     ap.add_argument(
+        "--sandbox-container",
+        default=None,
+        help=(
+            "Override the sandbox container image (e.g. one with extra libs baked in: "
+            "sklearn/z3/periodictable/pywt/control). Default None uses the cluster config sandbox."
+        ),
+    )
+    ap.add_argument(
+        "--direct-python",
+        action="store_true",
+        default=False,
+        help=(
+            "Use the in-process DirectPythonTool (calls the sandbox directly, no MCP subprocess) "
+            "instead of the MCP PythonTool. Matches Jiacheng's SCI-453/455 recipe. Swaps the "
+            "python_tool::PythonTool module string in tool arms."
+        ),
+    )
+    ap.add_argument(
         "--server-args-extra",
         default="",
         help="Append extra raw args to the spawned vLLM/SGLang server command.",
@@ -1499,6 +1535,15 @@ def main():
             + ctx_server_extra
             + (args.server_extra.strip() + " " if args.server_extra.strip() else "")
         )
+        # Optional: swap the MCP PythonTool for the in-process DirectPythonTool (SCI-453 recipe).
+        # python_tool::PythonTool is NOT a substring of python_tool::DirectPythonTool, so this is safe
+        # and idempotent. Note: tool_overrides for the timeout must then target DirectPythonTool
+        # (tool_overrides keyed by class name) — pass that in --server-extra at launch.
+        if args.direct_python and arm["use_tool_inference"]:
+            all_extra_args = all_extra_args.replace(
+                "python_tool::PythonTool", "python_tool::DirectPythonTool"
+            )
+
         # Optional max_tool_calls override (replaces the per-arm default set via _tool_modules).
         # Default None -> no change, so other users of this harness are unaffected. Use a targeted
         # regex (not the shlex helper) so the ++tool_modules=[...] list's quotes are left intact.
@@ -1522,6 +1567,7 @@ def main():
             split=args.split,
             output_dir=odir,
             with_sandbox=arm["sandbox"],
+            **({"sandbox_container": args.sandbox_container} if args.sandbox_container else {}),
             num_chunks=(args.num_chunks if args.num_chunks is not None else arm.get("num_chunks", 1)),
             num_jobs=(
                 args.num_jobs
