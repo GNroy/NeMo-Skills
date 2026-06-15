@@ -74,7 +74,7 @@ PAPER_CACHE_MAX_SIZE = 32
 # evaluation can launch many chunk processes, often on different nodes, so a
 # process-local lock is not enough. Use a small shared lock file on the
 # workspace mount when available; fall back to /tmp for local smoke tests.
-ARXIV_REQUEST_INTERVAL = float(os.getenv("ARXIV_REQUEST_INTERVAL", "4.0"))
+ARXIV_REQUEST_INTERVAL = float(os.getenv("ARXIV_REQUEST_INTERVAL", "1.0"))
 ARXIV_RATE_LIMIT_LOCK = os.getenv(
     "ARXIV_RATE_LIMIT_LOCK",
     os.path.join(tempfile.gettempdir(), "nemo_skills_arxiv_api_rate_limit.lock"),
@@ -414,8 +414,14 @@ def _parse_arxiv_atom(feed_text: str) -> list[dict[str, Any]]:
 
 
 async def _arxiv_api_search(query: str, max_results: int) -> str:
-    """Search arXiv's native Atom API with polite rate limiting."""
-    await _arxiv_rate_limit()
+    """Search arXiv's native Atom API with polite rate limiting + retry.
+
+    Mirrors the resilience of the wikipedia/OpenAlex paths: retries transient
+    failures (timeouts, connection errors, 429/5xx) with exponential backoff.
+    The previous single-shot ``raise_for_status`` turned any transient blip into
+    a hard "arXiv search failed" — which, combined with the old blocking rate
+    limiter, made arxiv-search fail ~wholesale under cluster-eval concurrency.
+    """
     params = {
         "search_query": query,
         "start": 0,
@@ -424,13 +430,27 @@ async def _arxiv_api_search(query: str, max_results: int) -> str:
         "sortOrder": "descending",
     }
     headers = {"User-Agent": USER_AGENT, "Accept": "application/atom+xml"}
-    async with httpx.AsyncClient(headers=headers) as client:
-        r = await client.get(ARXIV_BASE, params=params, timeout=HTTP_TIMEOUT)
-        r.raise_for_status()
-    entries = _parse_arxiv_atom(r.text)
-    if not entries:
-        return f"No arXiv papers found for query: {query!r}."
-    return "\n\n---\n\n".join(_format_arxiv_entry(e) for e in entries)
+    delay = INITIAL_BACKOFF
+    last_err: Exception | None = None
+    for attempt in range(NUM_RETRIES + 1):
+        await _arxiv_rate_limit()
+        try:
+            async with httpx.AsyncClient(headers=headers) as client:
+                r = await client.get(ARXIV_BASE, params=params, timeout=HTTP_TIMEOUT)
+            if r.status_code == 200:
+                entries = _parse_arxiv_atom(r.text)
+                if not entries:
+                    return f"No arXiv papers found for query: {query!r}."
+                return "\n\n---\n\n".join(_format_arxiv_entry(e) for e in entries)
+            last_err = RuntimeError(f"arXiv API returned HTTP {r.status_code}")
+            if r.status_code not in (429, 500, 502, 503, 504):
+                raise last_err
+        except (httpx.RequestError, httpx.TimeoutException) as e:
+            last_err = e
+        if attempt < NUM_RETRIES:
+            await asyncio.sleep(delay)
+            delay *= 2
+    raise last_err or RuntimeError("arXiv search failed after retries")
 
 
 async def _http_get_json(client: httpx.AsyncClient, url: str, params: dict[str, Any] | None = None) -> Any:
@@ -483,12 +503,19 @@ async def _http_get_json(client: httpx.AsyncClient, url: str, params: dict[str, 
 
 
 async def _arxiv_rate_limit() -> None:
-    """Throttle arXiv API requests across concurrent workers."""
+    """Throttle arXiv API requests across concurrent workers.
+
+    Reserve the next request slot under a brief file lock, then ``await`` the
+    delay in async land.  Critically we do NOT sleep while holding the lock or a
+    threadpool worker: the previous implementation slept the full interval inside
+    ``asyncio.to_thread``, so under the run's concurrency the blocked waits
+    exhausted asyncio's default threadpool and arxiv calls hung/failed wholesale.
+    """
     global _arxiv_last_request
 
     # Cross-process/node throttling for cluster evals. This keeps multiple
     # chunk workers from stampeding export.arxiv.org and getting HTTP 429.
-    def _locked_sleep() -> None:
+    def _reserve_slot() -> float:
         import fcntl
 
         lock_path = ARXIV_RATE_LIMIT_LOCK
@@ -508,22 +535,25 @@ async def _arxiv_rate_limit() -> None:
             except ValueError:
                 last = 0.0
             now = time.time()
-            wait = ARXIV_REQUEST_INTERVAL - (now - last)
-            if wait > 0:
-                time.sleep(wait)
-                now = time.time()
+            # Reserve the next slot (now or interval after the last reservation)
+            # and persist it, so concurrent callers get spaced wait times without
+            # anyone sleeping while holding the lock.
+            scheduled = max(now, last + ARXIV_REQUEST_INTERVAL)
             f.seek(0)
             f.truncate()
-            f.write(str(now))
+            f.write(str(scheduled))
             f.flush()
             try:
                 os.fsync(f.fileno())
             except OSError:
                 pass
             fcntl.flock(f, fcntl.LOCK_UN)
+        return max(0.0, scheduled - now)
 
     try:
-        await asyncio.to_thread(_locked_sleep)
+        wait = await asyncio.to_thread(_reserve_slot)
+        if wait > 0:
+            await asyncio.sleep(wait)
         return
     except Exception as e:
         logger.warning("Shared arXiv rate limiter failed (%s); falling back to process-local limiter", e)
