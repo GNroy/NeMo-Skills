@@ -1346,6 +1346,15 @@ def main():
         help="Override ++inference.tokens_to_generate for faster smoke/large-split runs.",
     )
     ap.add_argument(
+        "--temperature",
+        type=float,
+        default=None,
+        help=(
+            "Override ++inference.temperature for all arms (default per-model is 1.0). "
+            "Used to study sampling-temperature effects on the tool arm (e.g. 0.6)."
+        ),
+    )
+    ap.add_argument(
         "--max-concurrent-requests",
         type=int,
         default=None,
@@ -1450,6 +1459,8 @@ def main():
         print(f"{'=' * 70}")
     if args.tokens_to_generate is not None:
         print(f"  tokens cap:  {args.tokens_to_generate}")
+    if args.temperature is not None:
+        print(f"  temperature: {args.temperature}")
     if args.max_concurrent_requests is not None:
         print(f"  max conc:    {args.max_concurrent_requests}")
     if args.max_samples is not None:
@@ -1506,6 +1517,12 @@ def main():
                 inference_args,
                 "inference.tokens_to_generate",
                 args.tokens_to_generate,
+            )
+        if args.temperature is not None:
+            inference_args = _replace_or_append_hydra_arg(
+                inference_args,
+                "inference.temperature",
+                args.temperature,
             )
         runtime_extra_args = ""
         if args.max_concurrent_requests is not None:
