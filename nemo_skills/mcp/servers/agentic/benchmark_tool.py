@@ -268,10 +268,15 @@ class BenchmarkTool(Tool):
                         "goal_template": {
                             "type": "string",
                             "description": (
-                                "Per-task goal string with a literal '{id}' placeholder, e.g. "
-                                "\"Solve problem '{id}': call get_problem('{id}'), solve it, and "
-                                "end with a line 'Final Answer: <answer>'.\". '{id}' is replaced "
-                                "with each problem id. If omitted, a sensible default is used."
+                                "Per-task goal string with '{id}' and/or '{problem}' placeholders. "
+                                "'{id}' -> the problem id; '{problem}' -> the problem text inlined "
+                                "server-side (so the worker needs NO get_problem call — a pure "
+                                "no-tool worker); '{modality}' -> 'text'/'multimodal'. Answers are "
+                                "never inlined. e.g. fetch-style: \"Solve '{id}': call "
+                                "get_problem('{id}'), then end with 'Final Answer: <answer>'.\"; "
+                                "or inline-style: \"Solve this problem and end with 'Final Answer: "
+                                "<answer>':\\n\\n{problem}\". If omitted, a sensible fetch-style "
+                                "default is used."
                             ),
                         },
                         "limit": {
@@ -399,17 +404,29 @@ class BenchmarkTool(Tool):
         )
         ids = manifest["ids"]
         template = goal_template if (isinstance(goal_template, str) and goal_template.strip()) else _DEFAULT_GOAL_TEMPLATE
-        if "{id}" not in template:
-            raise ValueError("goal_template must contain the literal '{id}' placeholder.")
+        if "{id}" not in template and "{problem}" not in template:
+            raise ValueError("goal_template must contain '{id}' and/or '{problem}'.")
+
+        # {problem}/{modality} support: inline the problem text into each goal so the
+        # worker needs NO get_problem tool call (pure-generation / no-tool worker —
+        # the key tool-usage ablation). The text comes from the SAME whitelist
+        # extractor get_problem uses (id/prompt/modality only), so answers never
+        # touch the work-list. Only filled when the template asks for it.
+        inline = ("{problem}" in template) or ("{modality}" in template)
+        index = self._active_index() if inline else None
 
         out_path = self._resolve_plan_path(manifest["benchmark"], shard)
         n = 0
         with out_path.open("w", encoding="utf-8") as fh:
             for pid in ids:
-                # Only {id} is substituted; any other braces in the template are
-                # left intact (str.replace, not str.format, so worker code
-                # snippets with their own braces survive).
+                # str.replace (not str.format) so other braces in the template
+                # (e.g. worker code snippets) survive untouched.
                 goal = template.replace("{id}", str(pid))
+                if inline:
+                    prob = (index or {}).get(pid) or {}
+                    payload = {"id": pid, "prompt": prob.get("prompt", ""), "modality": prob.get("modality", "")}
+                    _assert_no_answer_leak(payload)  # belt-and-braces before it enters a goal
+                    goal = goal.replace("{problem}", payload["prompt"]).replace("{modality}", payload["modality"])
                 fh.write(json.dumps({"goal": goal}) + "\n")
                 n += 1
 

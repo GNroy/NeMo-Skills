@@ -447,3 +447,24 @@ def test_b20_plan_batch_rejects_template_without_id(tmp_path: Path) -> None:
     tool = _make_tool(plan_dir=str(tmp_path / "plans"))
     with pytest.raises(ValueError, match=r"\{id\}"):
         _run(tool.execute("plan_batch", {"benchmark": str(f), "goal_template": "no placeholder"}))
+
+
+def test_b21_plan_batch_inlines_problem_no_answer_leak(tmp_path: Path) -> None:
+    # {problem} inlines the prompt server-side so the worker needs no get_problem
+    # call (the pure no-tool worker). The expected_answer must NOT appear.
+    f = _write_jsonl(
+        tmp_path / "gpqa.jsonl",
+        [{"problem": "What is 2+2?\nA: 3\nB: 4", "expected_answer": "B", "uuid": "u-aaa"}],
+    )
+    tool = _make_tool(plan_dir=str(tmp_path / "plans"))
+    receipt = _run(
+        tool.execute(
+            "plan_batch",
+            {"benchmark": str(f), "goal_template": "Solve and end with Final Answer:\n\n{problem}"},
+        )
+    )
+    tasks = [json.loads(l) for l in Path(receipt["handle"]).read_text().strip().splitlines()]
+    assert len(tasks) == 1
+    g = tasks[0]["goal"]
+    assert "What is 2+2?" in g and "{problem}" not in g  # inlined
+    assert "expected_answer" not in g and '"B"' not in g  # answer never inlined
