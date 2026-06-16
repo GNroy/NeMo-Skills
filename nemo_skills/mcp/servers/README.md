@@ -47,7 +47,7 @@ server.  Use the generic stdio wrapper `nemo_skills.mcp.stdio_serve`
 | `nemo_skills.mcp.servers.web.arxiv_tool:ArxivSearchTool` | arXiv search + paper metadata. |
 | `nemo_skills.mcp.servers.web.wikipedia_tool:WikipediaSearchTool` | Wikipedia search + article fetch. |
 | `nemo_skills.mcp.servers.agentic.worklog_tool:WorklogTool` | Clock-in/clock-off work tracking; writes a markdown report per task ([agentic loop](#agentic-loop-tools-sci-548)). |
-| `nemo_skills.mcp.servers.agentic.benchmark_tool:BenchmarkTool` | `load_benchmark` (ids manifest) / `get_problem` (one problem, no answers) — the answer-hiding trust boundary ([batch_solve](#batch_solve--the-benchmark-trust-boundary-p2)). |
+| `nemo_skills.mcp.servers.agentic.benchmark_tool:BenchmarkTool` | `load_benchmark` (ids manifest) / `plan_batch` (staged work-list handle, large-batch) / `get_problem` (one problem, no answers) — the answer-hiding trust boundary ([batch_solve](#batch_solve--the-benchmark-trust-boundary-p2)). |
 
 Hermes consumes them uniformly:
 
@@ -184,10 +184,25 @@ grading config) and what any agent may see. Two tools, one server:
   side**. Returns an ids-only manifest `{count, total, ids:[...]}` — no problem
   text, no answers. Keeps the orchestrator's context `O(N ids)` so it scales
   past a 128k window (workers fetch their own problems).
+- `plan_batch(benchmark, goal_template, limit, shuffle, seed, shard)` →
+  **orchestrator side, large-batch path (the one to use at HLE scale)**. Expands
+  the (sharded/sampled) benchmark into a staged JSONL *work-list file* — one
+  `delegate_task` goal per id, built from `goal_template` by substituting `{id}`
+  (and optionally `{problem}`/`{modality}`, inlined server-side from the same
+  whitelist as `get_problem`, for tool-less workers) — and returns a small
+  `{handle, count, ...}` receipt: **not** the ids, never answers. The
+  orchestrator hands `handle` straight to
+  `delegate_task(tasks_source=handle, max_in_flight=N)` and dispatches the WHOLE
+  benchmark in **one** call, so its context is `O(1)` in the batch size — it
+  never generates (or holds) thousands of goal strings. This is what lets a
+  single orchestrator session cover all 2158 HLE problems without manual
+  sharding. Reuses `load_benchmark`'s id-derivation + sharding so plan/grade agree.
 - `get_problem(id)` → **worker side**. Returns exactly `{id, prompt, modality}`
   and nothing else — never `expected_answer` / `reference_solution` /
   `verifier_metadata`. The return is *constructed* by a whitelist, so a new
   leaky column can't slip through; a tripwire re-checks against a denylist.
+  (When `plan_batch` inlined `{problem}` into the goal, tool-less workers don't
+  even need this — see `force_child_toolsets` below.)
 
 Benchmark rows across Gym/NS are heterogeneous, so `id` and `prompt` are
 auto-detected (`id`/`uuid`/`hash_id`/… → fallback `row-<index>`; direct
@@ -226,6 +241,98 @@ join key is `benchmark_tool.derive_problem_id(row, index)` — exported and used
 by both the tool and any grader, so the answer↔response join always agrees.
 Existing Gym `verify` / `judge_rollouts.py` grade as today; pass-rate
 measurement across warm/cold iterations is P4.
+
+#### Running batch_solve end-to-end (validated recipe)
+
+Full HLE-2158 in **one** orchestrator job (no manual shards), validated
+2026-06-16: **20.76% (448/2158)** — matches the prior 22-shard baseline (20.7%),
+so the single-run path is a faithful, cheaper replacement.
+
+1. **Stage the benchmark** in Gym format with answers in `verifier_metadata`
+   (the trust-boundary tool hides them; the offline grader reads them). The same
+   file feeds both the workers (no-answer view) and grading.
+2. **Orchestrator prompt** (the rollout `input_file`) instructs, each tool EXACTLY
+   once: `clock_in` → `plan_batch(benchmark, goal_template=<…{id}…>)` →
+   `delegate_task(tasks_source=<handle>, max_in_flight=56)` → `clock_off`. Keep
+   the goal_template literal with `{id}` (and `{problem}` for tool-less workers).
+3. **Launch** (`NeMo-Skills/workdir-agents/validation/batch_solve_hle_newdeleg_full_k8_manifest.yaml`
+   is the K=8 reference):
+
+   ```bash
+   export NEMO_SKILLS_DISABLE_UNCOMMITTED_CHANGES_CHECK=1
+   export NEMO_SKILLS_SANDBOX_HOST='${SLURM_MASTER_NODE_HET_GROUP_0:-localhost}'
+   ns hermes_agent_rollouts --cluster aws-cmh --config_dir cluster_configs \
+     --agent_manifest <manifest>.yaml --input_file <orch_prompt>.jsonl \
+     --output_dir <out> --expname <name> \
+     --server_container .../sglang-v0.5.11.sqsh \         # FULL /lustre path (pyxis can't resolve /alaptev for an IMAGE)
+     --gym_container .../nemo-skills-dc43f3e.sqsh --sandbox_container .../nemo-skills-dc43f3e.sqsh \
+     --gym_path /alaptev/NeMo-Gym --hermes_agent_path /alaptev/hermes-agent \
+     --no-merge_back --no-with_sandbox
+   ```
+   The orchestrator is one het-group (1 node); the worker pool is a second
+   het-group (`server_type: sglang_router`, K nodes) that `delegate_task` reaches
+   via the injected `DELEGATION_BASE_URL`. `delegate_task` returns a compact
+   `batch_tally` (`status`, `completed`, `failed`, `failure_breakdown`,
+   `next_step`); per-worker answers land in `worklogs/`.
+4. **Grade** (deterministic join → LLM judge → tally; no answers ever touch an
+   agent):
+   ```bash
+   python fs_grade.py build --benchmark <staged>.jsonl --worklog-dir <out>/worklogs/<run_id> --out judge_input.jsonl
+   # judge/hle templates {problem}; fs_grade emits {question} -> add problem=question to each row, then:
+   ns generate --cluster aws-cmh --server_type vllm --model /hf_models/gpt-oss-120b --server_gpus 4 \
+     --server_container .../nemo-skills-vllm-dc43f3e.sqsh \
+     --input_file judge_input.jsonl --output_dir <out>/judge \
+     ++prompt_config=judge/hle ++generation_key=judgement ++add_generation_stats=False
+   python fs_grade.py tally --judged <out>/judge/output.jsonl
+   ```
+
+#### hermes-agent delegation dependency
+
+`batch_solve` runs on Hermes' native `delegate_task`, which lives in the
+**hermes-agent** repo (branch `sandbox-hermes-tools`), deployed to
+`/alaptev/hermes-agent` and put on the orchestrator's `PYTHONPATH` via
+`--hermes_agent_path` (NOT the gym's bundled `.venv` copy, which is older). The
+SCI-548 work added/fixed there, all required for the large-batch path:
+
+- **`tasks_source` + `max_in_flight` + bounded queue + `batch_tally`** — the
+  `plan_batch` handle consumer. The total count is unbounded (queued); at most
+  `max_in_flight` workers run at once.
+- **`_dispatch_delegate_task` forwards `tasks_source`/`max_in_flight`** — the
+  single live call site (`run_agent.py`) maps the model's args → `delegate_task`;
+  it must forward every schema field or the arg is silently dropped (this caused
+  a `tasks_source`-ignored → blind-retry meltdown; a regression test now asserts
+  every schema property is forwarded).
+- **Lazy, width-bounded child construction** — build only `~max_in_flight`
+  children before the first dispatch, then refill as slots free, instead of
+  building all N up front. Building thousands of `AIAgent`s serially before any
+  pool request left GPUs 100% idle for minutes → tripped the cluster idle-job
+  reaper. Now the pool saturates immediately.
+- **`delegation.force_child_toolsets`** (config, default unset) — pins every
+  child's toolset exactly; `[]` makes workers **tool-less** (pure reasoning over
+  an inlined `{problem}`), the no-tool-worker ablation. Honors an explicit empty
+  list as "no tools" (not "inherit").
+- **Structured terminal errors** — `delegate_task` errors carry
+  `error_code` / `terminal` / `retryable` / `hint` / `received` (echo of the args
+  the tool actually got) so the orchestrator self-corrects instead of
+  blind-retrying, and a failure is reconstructable from the trace.
+
+#### Gotchas (read before a fresh run)
+
+- **Idle-job reaper**, not preemption: a het-job whose worker pool sits ≤1% GPU
+  for 30 min is auto-`scancel`ed. Keep the pool saturated (lazy build above);
+  the "other agent" runs under the **same `alaptev` uid**, so never
+  `scancel`-by-`--me` — filter by jobid/expname.
+- **Normal teardown looks like a cancel**: when the orchestrator finishes, nemo-run
+  `scancel`s the persistent worker-pool het-group → `CANCELLED by <your-uid>`. That
+  is success-then-cleanup, not a failure. Confirm via `worklogs` + the trace's
+  final `batch_tally` + `clock_off`.
+- **Always inspect the orchestrator trace** (`<out>/traces/scientist/sess_*.jsonl`,
+  `tool_start`/`tool_complete`) to confirm exactly one `plan_batch` + one
+  `delegate_task(tasks_source)` + `clock_off` — surface signals (job state,
+  worklog counts) are necessary but not sufficient.
+- **`.ng.jsonl` carries `verifier_metadata.expected_answer`** — the same staged
+  file is both the workers' no-answer source (tool hides it) and the grader's
+  answer source.
 
 ### Adding a new wrapped tool
 
