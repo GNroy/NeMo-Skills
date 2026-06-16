@@ -1076,6 +1076,21 @@ ARMS = [
         "use_tool_inference": True,
         "install": None,
     },
+    # Harness-framing probe (SCI-575 / N3 Ultra GA review p.46): PythonTool is REGISTERED
+    # (agentic framing + tool schemas active) but the prompt instructs the model NOT to use
+    # tools and to answer directly. Delta vs the clean no-tool arm (1) isolates the
+    # harness-framing penalty (~8% in the GA deck) from actual tool execution. Uses tool
+    # inference args; keep cap=8 + force_final_answer at launch so any stray tool spiral
+    # still resolves to a final answer (so we measure framing, not the no-answer artifact).
+    {
+        "key": "python-framing-notool",
+        "desc": "+ PythonTool registered but prompt says DO NOT use tools (framing-only probe)",
+        "extra_args": _tool_modules(_PYTHON, max_tool_calls=8),
+        "prompt_config": "generic/hle-no-tools",
+        "sandbox": True,
+        "use_tool_inference": True,
+        "install": None,
+    },
 ]
 
 # Canonical arm-index quintet used by run_canonical_sweep.sh — 5 arms per

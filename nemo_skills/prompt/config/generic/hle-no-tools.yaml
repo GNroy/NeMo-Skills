@@ -1,0 +1,17 @@
+# HLE harness-framing probe (SCI-575): tools are REGISTERED in the agentic harness
+# (so the tool schemas / tool-calling chat template are active), but the model is
+# explicitly instructed NOT to use them and to answer directly. Comparing this arm
+# against the clean no-tool baseline isolates the "agentic-harness framing" penalty
+# from actual tool execution — the N3 Ultra GA review reports ~8% degradation
+# "even when asked to not use tools" (deck p.46).
+
+system: |-
+  You have tools available, but you must NOT use them. Do not call any tool.
+  Answer directly using only your own step-by-step reasoning.
+
+  Your response should be in the following format:
+  Explanation: {{your explanation for your final answer}}
+  Answer: {{your succinct, final answer}}
+  Confidence: {{your confidence score between 0% and 100% for your answer}}
+
+user: "{problem}"
