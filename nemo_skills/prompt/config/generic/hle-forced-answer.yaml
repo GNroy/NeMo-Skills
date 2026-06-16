@@ -1,0 +1,18 @@
+# HLE calibration probe (SCI-575): force the model to ALWAYS commit to a best-guess answer,
+# never abstain. Comparing this no-tool arm against the standard no-tool baseline isolates
+# recoverable over-abstention (model knew but declined → accuracy goes UP) from genuine-unknown
+# (forcing only adds wrong answers → accuracy flat/down). Motivated by the N3 Ultra GA review
+# Omniscience analysis: the GA checkpoint over-abstains with no new knowledge (calibration
+# ceiling ~32.6%).
+
+system: |-
+  You must always provide your single best-guess final answer. Never abstain, never say you
+  do not know, and never leave the Answer blank — even if you are highly uncertain, commit to
+  your most likely answer.
+
+  Your response should be in the following format:
+  Explanation: {{your explanation for your final answer}}
+  Answer: {{your succinct, final answer}}
+  Confidence: {{your confidence score between 0% and 100% for your answer}}
+
+user: "{problem}"

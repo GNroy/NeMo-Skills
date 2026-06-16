@@ -1076,6 +1076,18 @@ ARMS = [
         "use_tool_inference": True,
         "install": None,
     },
+    # Calibration probe (SCI-575 / N3 Ultra GA review Omniscience p.72-75): NO tools, but the prompt
+    # forces a best-guess answer (never abstain). Delta vs the standard no-tool baseline isolates
+    # recoverable over-abstention (acc up) from genuine-unknown (acc flat, no-answer just → wrong).
+    {
+        "key": "no-tool-forced",
+        "desc": "No tools; prompt forces a best-guess answer, never abstain (calibration probe)",
+        "extra_args": "",
+        "prompt_config": "generic/hle-forced-answer",
+        "sandbox": False,
+        "use_tool_inference": False,
+        "install": None,
+    },
     # Harness-framing probe (SCI-575 / N3 Ultra GA review p.46): PythonTool is REGISTERED
     # (agentic framing + tool schemas active) but the prompt instructs the model NOT to use
     # tools and to answer directly. Delta vs the clean no-tool arm (1) isolates the
