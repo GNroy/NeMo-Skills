@@ -1,0 +1,87 @@
+# LAZY / DYNAMIC ALLOCATION run (SCI-548). The orchestrator driver runs on a CPU
+# node (cpu partition, ~instant alloc); its own LLM AND its delegate_task children
+# both route to an EXTERNAL standalone sgl-model-gateway router (prehosted_url) fed
+# by separately-submitted, chunked 1-node GPU sglang servers (router_pool/). No GPU
+# server is allocated inside this job -> no 16-node monolith to wait on.
+#
+# Bring up the pool FIRST (router_pool/):
+#   sbatch router_pool/start_router.sh            # CPU router, publishes router_url
+#   router_pool/submit_chunk.sh 16                # 16 independent 1-node GPU replicas
+# then launch this manifest. The driver waits on /v1/models (200 once >=1 replica
+# is registered) and starts as soon as the first replica lands; throughput grows as
+# more chunks register.
+#
+# Submit with: --server_container <sglang.sqsh> (unused here, no in-job server)
+#   --gym_container .../nemo-skills-dc43f3e.sqsh
+#   --sandbox_container .../nemo-skills-sandbox-dc43f3e.sqsh
+#   --hermes_agent_path /alaptev/hermes-agent   (NO --no-with_sandbox)
+
+template_hermes_home: /alaptev/NeMo-Gym/responses_api_agents/hermes_agent/hermes_home_template_swarm100_proc
+trace_dir_subpath: traces
+
+sandbox:
+  mounts: []
+
+agents:
+  scientist:
+    role: orchestrator
+    model: /hf_models/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4
+    # LLM is external; runtime shell expr reads the router URL the CPU job published.
+    prehosted_url: "$(cat /alaptev/data/lazypool/router_url)/v1"
+    # NO delegation_pool: children inherit the orchestrator's prehosted_url, so the
+    # whole swarm hits the dynamic router. process-mode width baked into the template
+    # config.yaml (executor: process, max_concurrent_children: 128).
+    hermes:
+      max_turns: 60
+      enabled_toolsets:
+        - delegation
+        - mcp-worklog
+        - mcp-benchmark
+        - mcp-python
+      disabled_toolsets:
+        - file
+        - memory
+        - terminal
+        - code_execution
+        - web
+        - browser
+        - skills
+        - send_message
+        - cronjob
+        - kanban
+      persist_memory: false
+      persist_skills: false
+      persist_session: false
+      save_trajectories: true
+      enable_compression: false
+      disable_streaming: true
+      completion_marker: "Final Answer:"
+      mcp_servers:
+        worklog:
+          command: /usr/bin/python3
+          args:
+            - -m
+            - nemo_skills.mcp.stdio_serve
+            - nemo_skills.mcp.servers.agentic.worklog_tool:WorklogTool
+          env:
+            PYTHONPATH: /alaptev/NeMo-Skills-clean
+            NS_WORKLOG_DIR: "{output_dir}/worklogs"
+            NS_WORKLOG_RUN_ID: nhwlazy
+            NS_WORKLOG_AGENT_ID: scientist
+        benchmark:
+          command: /usr/bin/python3
+          args:
+            - -m
+            - nemo_skills.mcp.stdio_serve
+            - nemo_skills.mcp.servers.agentic.benchmark_tool:BenchmarkTool
+          env:
+            PYTHONPATH: /alaptev/NeMo-Skills-clean
+            NS_BENCHMARK_PATH: /alaptev/data/hle_full2158.ng.jsonl
+            NS_BATCH_PLAN_DIR: "{output_dir}/batch_plans"
+        python:
+          command: /usr/bin/python3
+          args:
+            - -m
+            - nemo_skills.mcp.servers.python_tool
+          env:
+            PYTHONPATH: /alaptev/NeMo-Skills-clean

@@ -1,0 +1,149 @@
+# CLEAN SAME-CHUNK A0 (tool-mode workers) — the FIRST genuine tool-mode worker
+# run in this harness. Apples-to-apples with A3 (no-tool, 21.00%) on the SAME
+# hle_chunk100 (100 problems). Difference vs A3: workers HAVE a real Python
+# tool (stateful Jupyter sandbox via the NeMo-Skills python_tool MCP server),
+# in addition to the worklog/benchmark plumbing tools they inherit.
+#
+# NOTE (corrects prior labelling): the earlier "A0 = tool-mode" (full-2158,
+# 20.76%) and "full_clean" runs gave workers only worklog+benchmark MCP and
+# explicitly told them "NO tools beyond worklog/benchmark ... do not attempt
+# code or search" — i.e. they were ALSO pure-reasoning. This manifest is the
+# first to actually give workers code execution.
+#
+# Submit WITH the sandbox enabled (drop --no-with_sandbox; --with_sandbox is the
+# default). The python_tool MCP server (launched once by the orchestrator,
+# shared by all child workers) reaches the per-het-group sandbox at
+# NEMO_SKILLS_SANDBOX_HOST = the group-0 node (${SLURM_MASTER_NODE_HET_GROUP_0},
+# resolved from the gym container env by hermes' _interpolate_env_vars).
+#
+# Submit with: --server_container /lustre/.../alaptev/containers/sglang-v0.5.11.sqsh
+#   --gym_container + --sandbox_container = .../igitman/images/nemo-skills-dc43f3e.sqsh
+#   --hermes_agent_path /alaptev/hermes-agent
+#   (NO --no-with_sandbox — the python tool needs the sandbox)
+
+template_hermes_home: /alaptev/NeMo-Gym/responses_api_agents/hermes_agent/hermes_home_template_swarm100
+trace_dir_subpath: traces
+
+sandbox:
+  mounts: []
+
+agents:
+  scientist:
+    role: orchestrator
+    model: /hf_models/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4
+    server_type: sglang
+    server_gpus: 4
+    server_nodes: 1
+    delegation_pool: workers
+    # Orchestrator does NOT solve (plan_batch stages the work-list to a file).
+    # NO EAGLE; mem 0.70.
+    server_args: >-
+      --expert-parallel-size 4
+      --quantization modelopt_fp4
+      --kv-cache-dtype fp8_e4m3
+      --context-length 262144
+      --mem-fraction-static 0.70
+      --max-running-requests 4
+      --mamba-scheduler-strategy no_buffer
+      --disable-piecewise-cuda-graph
+      --disable-radix-cache
+      --reasoning-parser nemotron_3
+      --tool-call-parser qwen3_coder
+    hermes:
+      max_turns: 60
+      delegation:
+        max_concurrent_children: 480
+      enabled_toolsets:
+        - delegation
+        - mcp-worklog
+        - mcp-benchmark
+        # mcp-python is enabled here so the python_tool MCP server is LAUNCHED
+        # by the orchestrator process; child workers inherit it. The orchestrator
+        # itself is told to delegate-only and never calls it.
+        - mcp-python
+      disabled_toolsets:
+        - file
+        - memory
+        - terminal
+        - code_execution
+        - web
+        - browser
+        - skills
+        - send_message
+        - cronjob
+        - kanban
+      persist_memory: false
+      persist_skills: false
+      persist_session: false
+      save_trajectories: true
+      enable_compression: false
+      disable_streaming: true
+      completion_marker: "Final Answer:"
+      mcp_servers:
+        worklog:
+          command: /usr/bin/python3
+          args:
+            - -m
+            - nemo_skills.mcp.stdio_serve
+            - nemo_skills.mcp.servers.agentic.worklog_tool:WorklogTool
+          env:
+            PYTHONPATH: /alaptev/NeMo-Skills-clean
+            NS_WORKLOG_DIR: "{output_dir}/worklogs"
+            NS_WORKLOG_RUN_ID: nha0py5s
+            NS_WORKLOG_AGENT_ID: scientist
+        benchmark:
+          command: /usr/bin/python3
+          args:
+            - -m
+            - nemo_skills.mcp.stdio_serve
+            - nemo_skills.mcp.servers.agentic.benchmark_tool:BenchmarkTool
+          env:
+            PYTHONPATH: /alaptev/NeMo-Skills-clean
+            NS_BENCHMARK_PATH: /alaptev/data/hle_full2158_5seed.ng.jsonl
+            NS_BATCH_PLAN_DIR: "{output_dir}/batch_plans"
+        # NEW: stateful Python sandbox tool. Shared by all child workers
+        # (inherited MCP toolset). Reaches the group-0 sandbox over HTTP.
+        python:
+          command: /usr/bin/python3
+          args:
+            - -m
+            - nemo_skills.mcp.servers.python_tool
+          env:
+            PYTHONPATH: /alaptev/NeMo-Skills-clean
+            # NEMO_SKILLS_SANDBOX_HOST/PORT are NOT set here on purpose: the gym
+            # process exports the correct (dynamically allocated) values, and
+            # hermes' _SAFE_ENV_KEYS now passes them through to this MCP subprocess
+            # automatically. Setting them here with un-interpolated ${...} literals
+            # would override the inherited real values and break LocalSandbox.
+  workers:
+    role: worker
+    model: /hf_models/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4
+    server_type: sglang_router
+    server_gpus: 4
+    server_nodes: 64
+    server_args: >-
+      --expert-parallel-size 4
+      --quantization modelopt_fp4
+      --kv-cache-dtype fp8_e4m3
+      --context-length 262144
+      --max-running-requests 8
+      --mem-fraction-static 0.82
+      --cuda-graph-max-bs 16
+      --mamba-scheduler-strategy no_buffer
+      --disable-piecewise-cuda-graph
+      --disable-radix-cache
+      --speculative-algorithm EAGLE
+      --speculative-num-steps 5
+      --speculative-eagle-topk 1
+      --speculative-num-draft-tokens 5
+      --reasoning-parser nemotron_3
+      --tool-call-parser qwen3_coder
+    hermes:
+      # Tool use needs turns: think -> call python -> observe -> (maybe iterate)
+      # -> clock_off. 4 was enough for pure reasoning; bump to 12 for tool loops.
+      max_turns: 12
+      enabled_toolsets: []
+      persist_memory: false
+      persist_skills: false
+      persist_session: false
+      save_trajectories: true

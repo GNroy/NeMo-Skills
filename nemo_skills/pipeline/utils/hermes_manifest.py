@@ -85,9 +85,30 @@ class HermesAgentSpec:
     # orchestrator in Phase 1; ignored otherwise.
     workers: List[str] = field(default_factory=list)
 
+    # Optional: name of another declared (model-owning) agent whose LLM
+    # SERVER should serve this agent's delegate_task children.  When set on
+    # the orchestrator, the pipeline exports DELEGATION_BASE_URL=<that server's
+    # URL> so delegate_task workers run on a SEPARATE pool from the orchestrator
+    # (e.g. orchestrator @ big context / low concurrency, workers @ smaller
+    # context / high concurrency via vllm_dp_ray).  Unlike `workers`/`call_<name>`
+    # (gym /task peers), this routes the dynamic delegate_task children — the
+    # batch_solve path — and does NOT require the pool agent to do any work.
+    delegation_pool: Optional[str] = None
+
     # CPU/memory hints for dispatcher het-groups (ignored when ``kind == "agent"``).
     dispatcher_cpus: int = 2
     dispatcher_mem_gb: int = 8
+
+    # Lazy/dynamic allocation: when set, this agent's LLM is an EXTERNAL pre-hosted
+    # endpoint (e.g. a standalone sgl-model-gateway router fed by separately-submitted
+    # GPU server jobs) instead of a GPU server allocated inside this het-job. The agent
+    # still declares ``model`` (the model NAME sent to the API). No GPUs are requested
+    # for its group; the orchestrator's own LLM calls AND its delegate_task children
+    # both route to ``prehosted_url``. The value may be a runtime shell expression
+    # (e.g. ``$(cat /path/router_url)/v1``) — it is interpolated into the launch command
+    # body and expanded on the (CPU) node at run time. Default None preserves all
+    # existing GPU-server behaviour.
+    prehosted_url: Optional[str] = None
 
 
 @dataclass
@@ -144,6 +165,12 @@ class ServerGroup:
         return self.owner.kind == "dispatcher"
 
     @property
+    def is_prehosted(self) -> bool:
+        # Lazy/dynamic allocation: owner's LLM is an external endpoint, so this
+        # group requests NO GPUs and starts no in-job server.
+        return bool(self.owner.prehosted_url)
+
+    @property
     def model(self) -> str:
         # ``owner.model`` is guaranteed non-empty by parse_manifest for
         # kind=agent owners; dispatcher groups have no LLM and callers
@@ -156,7 +183,7 @@ class ServerGroup:
 
     @property
     def server_gpus(self) -> int:
-        return 0 if self.is_dispatcher else self.owner.server_gpus
+        return 0 if (self.is_dispatcher or self.is_prehosted) else self.owner.server_gpus
 
     @property
     def server_nodes(self) -> int:
@@ -286,6 +313,24 @@ def parse_manifest(source: Union[str, Path, Dict[str, Any]]) -> HermesFleetManif
             if w == a.name:
                 raise ValueError(f"agent {a.name!r}: cannot list itself in 'workers'")
 
+    # Validate delegation_pool: must reference a declared, model-OWNING agent
+    # (its LLM server hosts the delegate_task children) other than itself.
+    for a in agents:
+        if not a.delegation_pool:
+            continue
+        pool = by_name.get(a.delegation_pool)
+        if pool is None:
+            raise ValueError(
+                f"agent {a.name!r}: delegation_pool={a.delegation_pool!r} is not a declared agent"
+            )
+        if a.delegation_pool == a.name:
+            raise ValueError(f"agent {a.name!r}: delegation_pool cannot reference itself")
+        if pool.kind != "agent" or not pool.model:
+            raise ValueError(
+                f"agent {a.name!r}: delegation_pool={a.delegation_pool!r} must be a kind=agent "
+                f"entry that OWNS a model (it provides the LLM server for delegate_task workers)"
+            )
+
     return HermesFleetManifest(
         agents=agents,
         template_hermes_home=data.get("template_hermes_home"),
@@ -312,8 +357,10 @@ def _spec_from_dict(name: str, spec: Dict[str, Any]) -> HermesAgentSpec:
         "server_args",
         "hermes",
         "workers",
+        "delegation_pool",
         "dispatcher_cpus",
         "dispatcher_mem_gb",
+        "prehosted_url",
     }
     extra = set(spec.keys()) - known
     if extra:
@@ -331,8 +378,10 @@ def _spec_from_dict(name: str, spec: Dict[str, Any]) -> HermesAgentSpec:
         server_args=spec.get("server_args", ""),
         hermes=dict(spec.get("hermes", {}) or {}),
         workers=list(spec.get("workers", []) or []),
+        delegation_pool=spec.get("delegation_pool"),
         dispatcher_cpus=int(spec.get("dispatcher_cpus", 2)),
         dispatcher_mem_gb=int(spec.get("dispatcher_mem_gb", 8)),
+        prehosted_url=spec.get("prehosted_url"),
     )
 
 

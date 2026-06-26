@@ -14,6 +14,7 @@
 
 """NeMo Gym rollout collection script for NeMo-Skills pipeline."""
 
+import os
 import shlex
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
@@ -77,6 +78,19 @@ class NemoGymRolloutsScript(BaseJobScript):
     done_sentinel: Optional[str] = None
     policy_api_key: str = "dummy"
     policy_model_name: Optional[str] = None
+    # Optional: a DIFFERENT LLM ServerScript whose URL should serve the
+    # orchestrator's delegate_task children (the worker pool).  When set, we
+    # export DELEGATION_BASE_URL=<that server's URL> so hermes-agent routes
+    # delegate_task workers there instead of the orchestrator's own server.
+    # Resolved cross-het-group at runtime via hostname_ref().
+    delegation_server: Optional["ServerScript"] = None
+    # Lazy/dynamic allocation alternative to ``delegation_server``: route
+    # delegate_task children to an EXTERNAL endpoint (a standalone router) given
+    # as a literal URL + model name rather than an in-job ServerScript. May be a
+    # runtime shell expression (e.g. ``$(cat /path/router_url)/v1``). Mutually
+    # exclusive with ``delegation_server``.
+    delegation_base_url_literal: Optional[str] = None
+    delegation_model_literal: Optional[str] = None
 
     log_prefix: str = field(default="nemo_gym", init=False)
 
@@ -131,8 +145,20 @@ class NemoGymRolloutsScript(BaseJobScript):
             else:
                 vllm_server_url = ""
 
-            # Build server wait command using shared utility
-            if vllm_server_url:
+            # Build server wait command using shared utility.
+            # Prehosted/external endpoint (lazy/dynamic router): the URL is
+            # reachable immediately but serves NO model until a GPU worker
+            # registers. Wait for a real model entry on /models (HTTP 200 with an
+            # "id") rather than mere reachability — otherwise the orchestrator
+            # starts against an empty pool and every call 500s. This is also the
+            # "start as soon as the first replica lands" gate the design wants.
+            if vllm_server_url and self.server_address is not None:
+                server_wait_cmd = (
+                    f"echo 'Waiting for a registered model at {vllm_server_url}/models' && "
+                    f"until curl -sf {vllm_server_url}/models 2>/dev/null | grep -q '\"id\"'; "
+                    f"do sleep 5; done"
+                )
+            elif vllm_server_url:
                 server_wait_cmd = get_server_wait_cmd(f"{vllm_server_url}/models")
             else:
                 server_wait_cmd = ""
@@ -164,9 +190,103 @@ PY
             else:
                 sentinel_setup = ""
 
+            # delegation_pool: route delegate_task children to a SEPARATE LLM
+            # server (the worker pool).  Export DELEGATION_BASE_URL in the COMMAND
+            # BODY (not the executor env) so the runtime SLURM het-group hostname
+            # in hostname_ref() is shell-expanded here — putting a ${SLURM_...}
+            # value in the executor env dict instead trips the submit-time
+            # placeholder resolver (cluster.py). hermes-agent's delegate_tool
+            # reads DELEGATION_BASE_URL/DELEGATION_MODEL when delegation.base_url
+            # is unset in config.yaml.
+            delegation_wait_block = ""
+            # Resolve the delegate_task pool URL + model from EITHER an in-job
+            # ServerScript (cross-het-group hostname_ref) OR an external literal
+            # URL (lazy/dynamic allocation). delegation_server takes precedence.
+            if self.delegation_server is not None:
+                _dele_url = (
+                    f"http://{self.delegation_server.hostname_ref()}:{self.delegation_server.port}/v1"
+                )
+                _dele_model = self.delegation_server.model_path
+            elif self.delegation_base_url_literal is not None:
+                _dele_url = self.delegation_base_url_literal
+                _dele_model = self.delegation_model_literal or (self.policy_model_name or "")
+            else:
+                _dele_url = None
+                _dele_model = None
+            if _dele_url is not None:
+                delegation_setup = (
+                    f'export DELEGATION_BASE_URL="{_dele_url}"\n'
+                    f"export DELEGATION_MODEL={shlex.quote(_dele_model or '')}\n"
+                    # The pool is on a DIFFERENT node, so hermes-agent's
+                    # is_local_endpoint() (host-string match) does NOT treat it as
+                    # local and the non-stream stale watchdog falls back to its 300s
+                    # default — which kills long heavy-reasoner worker solves before
+                    # they return (same-node runs get an infinite local timeout).
+                    # Bump it so a full worker generation isn't aborted; the
+                    # per-child wall-clock (delegation.child_timeout_seconds) remains
+                    # the real bound. Honour an operator-set value if present.
+                    f'export HERMES_API_CALL_STALE_TIMEOUT="${{HERMES_API_CALL_STALE_TIMEOUT:-2400}}"\n'
+                    f'echo "delegate_task children -> DELEGATION_BASE_URL=$DELEGATION_BASE_URL '
+                    f'(stale_timeout=$HERMES_API_CALL_STALE_TIMEOUT s)"\n'
+                )
+                # Also wait for the worker-pool server (a different het-group, often
+                # slower to boot — e.g. multi-node DP) so the first delegate_task
+                # children don't hit a not-yet-ready endpoint. For an external/literal
+                # endpoint (lazy/dynamic router) wait for a real model entry, not mere
+                # reachability (see the main server wait above).
+                if self.delegation_base_url_literal is not None and self.delegation_server is None:
+                    _dele_wait = (
+                        f"until curl -sf {_dele_url}/models 2>/dev/null | grep -q '\"id\"'; "
+                        f"do sleep 5; done"
+                    )
+                else:
+                    _dele_wait = get_server_wait_cmd(f"{_dele_url}/models")
+                delegation_wait_block = (
+                    f'echo "=== Waiting for delegation worker-pool server at {_dele_url} ==="\n'
+                    f"{_dele_wait}\n"
+                    f'echo "worker-pool server is ready!"\n'
+                )
+            else:
+                delegation_setup = ""
+
+            # Optional MCP tool sidecars (lazy-allocation Stage 1): run a single
+            # set of shared HTTP MCP services (worklog/benchmark/python) ON THIS
+            # node instead of one stdio server per delegate child. Gated by the
+            # NS_GYM_SIDECAR_SCRIPT env var read at submit time (default unset ->
+            # empty block -> behavior identical to before). The referenced script
+            # launches the sidecars in the background, polls them, and writes a
+            # ``<script>.ready`` sentinel; it inherits this script's environment
+            # (the activated Gym venv + NEMO_SKILLS_SANDBOX_HOST/PORT for python).
+            sidecar_script = os.environ.get("NS_GYM_SIDECAR_SCRIPT")
+            if sidecar_script:
+                _sc_q = shlex.quote(sidecar_script)
+                sidecar_block = (
+                    f'echo "=== Launching MCP tool sidecars: {sidecar_script} ==="\n'
+                    f'NS_SIDECAR_READY={_sc_q}.ready\n'
+                    f'rm -f "$NS_SIDECAR_READY"\n'
+                    f'bash {_sc_q} &\n'
+                    f'NS_SIDECAR_PID=$!\n'
+                    f'echo "sidecar launcher PID: $NS_SIDECAR_PID"\n'
+                    f'for i in $(seq 1 180); do\n'
+                    f'    [ -f "$NS_SIDECAR_READY" ] && {{ echo "MCP sidecars ready"; break; }}\n'
+                    f'    kill -0 $NS_SIDECAR_PID 2>/dev/null || {{ echo "ERROR: sidecar launcher exited early"; exit 1; }}\n'
+                    f'    sleep 1\n'
+                    f'done\n'
+                    f'[ -f "$NS_SIDECAR_READY" ] || {{ echo "ERROR: MCP sidecars not ready in time"; exit 1; }}\n'
+                )
+            else:
+                sidecar_block = ""
+
             cmd = f"""set -e
 set -o pipefail
-{sentinel_setup}
+# Raise the open-file-descriptor soft limit toward the hard cap. At high
+# delegate width (e.g. 128 children, each holding sockets to the gym adapter +
+# tool servers) the default soft limit (often 1024) is exhausted, surfacing as
+# a ClientOSError storm on the local adapter and a stalled run (observed on the
+# full-2158 width-128 lazy run). Best-effort: never fail the job over it.
+ulimit -n 1048576 2>/dev/null || ulimit -n "$(ulimit -Hn)" 2>/dev/null || true
+echo "open-file limit (soft/hard): $(ulimit -Sn)/$(ulimit -Hn)"
+{sentinel_setup}{delegation_setup}
 # Install/sync NeMo Gym venv. The nemo-rl container has Gym pre-installed,
 # but when users mount a custom Gym path (e.g., from a dev branch or worktree),
 # the mounted directory may not have a .venv. The --allow-existing flag makes
@@ -204,7 +324,8 @@ if [ -n "{vllm_server_url}" ]; then
     {server_wait_cmd}
     echo "vLLM server is ready!"
 fi
-
+{delegation_wait_block}
+{sidecar_block}
 echo "=== Starting NeMo Gym servers ==="
 {ng_run_cmd} &
 NG_RUN_PID=$!

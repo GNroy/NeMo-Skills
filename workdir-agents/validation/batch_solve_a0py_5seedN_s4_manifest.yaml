@@ -1,0 +1,65 @@
+# LAZY ALLOCATION — STAGE 2 (SCI-548): shared HTTP-MCP sidecars + EXTERNAL shared sandbox.
+# Same swarm as the lazy s0 manifest, BUT the 3 MCP tools (worklog/benchmark/
+# python) are served ONCE as shared HTTP MCP services on the driver node instead
+# of one stdio server per delegate child (kills the ~28 GB / ~387-proc per-child
+# MCP overhead — see LAZY_ALLOCATION_NEXT_SESSION_PLAN.md Part 3 Stage 1).
+#
+# The sidecars are launched by the gym driver script via the NS_GYM_SIDECAR_SCRIPT
+# hook (router_pool/gym_sidecars.sh), which binds worklog:9101 benchmark:9102
+# python:9103 on 127.0.0.1. process-mode keeps every child on the driver node, so
+# 127.0.0.1 is reachable by the orchestrator AND all children. Server keys MUST
+# stay worklog/benchmark/python so the prompt's mcp_<server>_<tool> names resolve.
+#
+# Bring up the pool FIRST (router_pool/), then launch with:
+#   NS_GYM_SIDECAR_SCRIPT=/alaptev/router_pool/gym_sidecars.sh \
+#   ns hermes_agent_rollouts ... --agent_manifest batch_solve_a0py_stage1_manifest.yaml
+#   --gym_container .../nemo-skills-dc43f3e.sqsh
+#   --sandbox_container .../nemo-skills-sandbox-dc43f3e.sqsh
+#   --hermes_agent_path /alaptev/hermes-agent --qos cpu-short
+
+template_hermes_home: /alaptev/NeMo-Gym/responses_api_agents/hermes_agent/hermes_home_template_swarm100_proc
+trace_dir_subpath: traces
+
+sandbox:
+  mounts: []
+
+agents:
+  scientist:
+    role: orchestrator
+    model: /hf_models/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4
+    prehosted_url: "$(cat /alaptev/data/lazypool_5seed/router_url)/v1"
+    hermes:
+      max_turns: 60
+      enabled_toolsets:
+        - delegation
+        - mcp-worklog
+        - mcp-benchmark
+        - mcp-python
+      disabled_toolsets:
+        - file
+        - memory
+        - terminal
+        - code_execution
+        - web
+        - browser
+        - skills
+        - send_message
+        - cronjob
+        - kanban
+      persist_memory: false
+      persist_skills: false
+      persist_session: false
+      save_trajectories: true
+      enable_compression: false
+      disable_streaming: true
+      completion_marker: "Final Answer:"
+      # Shared HTTP MCP sidecars (StreamableHTTP). url: -> hermes-agent mcp_tool.py
+      # HTTP transport; NO per-child subprocess. Config (worklog dir/run_id,
+      # benchmark path, sandbox host/port) lives in the sidecar launcher, not here.
+      mcp_servers:
+        worklog:
+          url: "http://127.0.0.1:9141/mcp"
+        benchmark:
+          url: "http://127.0.0.1:9142/mcp"
+        python:
+          url: "http://127.0.0.1:9143/mcp"

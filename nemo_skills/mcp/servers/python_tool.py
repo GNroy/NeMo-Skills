@@ -76,6 +76,13 @@ def main():
         default=False,
         help="Skip replaying session history after sandbox worker restarts (overrides config)",
     )
+    parser.add_argument(
+        "--transport", choices=["stdio", "streamable-http", "sse"], default="stdio",
+        help="MCP transport (default: stdio spawns one server per client). Use "
+        "streamable-http/sse to serve a single shared HTTP MCP service many clients reach by URL.",
+    )
+    parser.add_argument("--host", default="0.0.0.0", help="Bind host for HTTP transports (default: 0.0.0.0).")
+    parser.add_argument("--port", type=int, default=9002, help="Bind port for HTTP transports (default: 9002).")
     add_config_args(parser)
     args = parser.parse_args()
 
@@ -95,8 +102,15 @@ def main():
         sandbox_cfg["disable_session_restore"] = True
 
     sandbox = get_sandbox(**sandbox_cfg)
-    # Initialize and run the server
-    mcp.run(transport="stdio")
+    # Initialize and run the server. stdio (default) spawns one server per MCP client;
+    # the HTTP transports serve a single shared MCP service many clients reach by URL
+    # (collapses the per-child python-bridge procs to one -- see lazy-allocation Stage 1).
+    if args.transport == "stdio":
+        mcp.run(transport="stdio")
+    else:
+        mcp.settings.host = args.host
+        mcp.settings.port = args.port
+        mcp.run(transport=args.transport)
 
 
 # ==============================

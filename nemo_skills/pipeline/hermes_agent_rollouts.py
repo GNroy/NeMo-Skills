@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -287,6 +288,38 @@ def _build_jobs(
                 break
 
     # ------------------------------------------------------------------
+    # Pre-create one ServerScript per non-dispatcher het-group BEFORE the
+    # command loop, so cross-group references (e.g. delegation_pool, which
+    # routes the orchestrator's delegate_task children to another group's LLM
+    # server) point at the SAME object — same allocated port, and het_group_index
+    # is filled in by the Pipeline before any build_cmd runs.
+    server_script_by_group: Dict[int, Optional[ServerScript]] = {}
+    for group in groups:
+        if group.is_dispatcher or group.is_prehosted:
+            # Prehosted groups: the LLM is an external endpoint (no in-job server).
+            server_script_by_group[group.het_group] = None
+            continue
+        server_script_by_group[group.het_group] = ServerScript(
+            server_type=group.server_type,
+            model_path=group.model,
+            cluster_config=cluster_config,
+            num_gpus=group.server_gpus,
+            num_nodes=group.server_nodes,
+            server_args=group.server_args,
+            allocate_port=True,
+        )
+    # owner-agent name -> its LLM ServerScript (for delegation_pool resolution).
+    server_script_by_owner: Dict[str, ServerScript] = {
+        g.owner.name: server_script_by_group[g.het_group]
+        for g in groups
+        if not g.is_dispatcher and server_script_by_group[g.het_group] is not None
+    }
+    # The pool whose LLM server hosts the orchestrator's delegate_task children.
+    delegation_server_script: Optional[ServerScript] = None
+    if orchestrator.delegation_pool:
+        delegation_server_script = server_script_by_owner.get(orchestrator.delegation_pool)
+
+    # ------------------------------------------------------------------
     # Build a CommandGroup per het-group
     # ------------------------------------------------------------------
     command_groups: List[CommandGroup] = []
@@ -299,34 +332,42 @@ def _build_jobs(
         sandbox_script: Optional[SandboxScript] = None
 
         if not group.is_dispatcher:
-            # 1. LLM server for this group.
-            server_type = group.server_type
-            server_container = server_container_override or containers.get(server_type)
-            if server_container is None:
-                raise ValueError(
-                    f"cluster_config['containers'] has no entry for server type {server_type!r} "
-                    f"(group {group.het_group}); set --server_container or extend the config."
+            # 1. LLM server for this group (pre-created above).  SKIP for a
+            # prehosted group — its LLM is an external endpoint (lazy/dynamic
+            # allocation) — but still give it a sandbox below (the orchestrator
+            # runs the python_tool MCP server and needs one).
+            if not group.is_prehosted:
+                server_type = group.server_type
+                server_container = server_container_override or containers.get(server_type)
+                if server_container is None:
+                    raise ValueError(
+                        f"cluster_config['containers'] has no entry for server type {server_type!r} "
+                        f"(group {group.het_group}); set --server_container or extend the config."
+                    )
+                server_script = server_script_by_group[group.het_group]
+                commands.append(
+                    Command(
+                        script=server_script,
+                        container=server_container,
+                        name=f"{expname}_g{group.het_group}_server",
+                    )
                 )
-            server_script = ServerScript(
-                server_type=server_type,
-                model_path=group.model,
-                cluster_config=cluster_config,
-                num_gpus=group.server_gpus,
-                num_nodes=group.server_nodes,
-                server_args=group.server_args,
-                allocate_port=True,
-            )
-            commands.append(
-                Command(
-                    script=server_script,
-                    container=server_container,
-                    name=f"{expname}_g{group.het_group}_server",
-                )
-            )
 
             # 2. Sandbox per non-dispatcher group (workers in non-orchestrator
             # groups need their own sandbox because they're on a different node).
-            if with_sandbox:
+            # EXCEPT a delegation_pool group: it is SERVER-ONLY (no HermesAgent
+            # head — see the skip at the per-agent loop below), so no agent runs
+            # code there. Its delegate-children execute IN the orchestrator's gym
+            # process and share the orchestrator's python_tool MCP server -> the
+            # ORCHESTRATOR group's sandbox. Creating a second sandbox here would
+            # also collide on the single job-level NGINX_PORT env var (both
+            # sandbox containers read the same NGINX_PORT, but the gym's
+            # NEMO_SKILLS_SANDBOX_PORT is set from THIS group's sandbox_script.port)
+            # -> python_tool points at a dead port. So skip it.
+            is_delegation_pool_group = bool(orchestrator.delegation_pool) and any(
+                a.name == orchestrator.delegation_pool for a in group.agents
+            )
+            if with_sandbox and not is_delegation_pool_group:
                 sandbox_script = SandboxScript(
                     cluster_config=cluster_config,
                     allocate_port=True,
@@ -347,6 +388,14 @@ def _build_jobs(
         for agent in group.agents:
             is_orch = agent.name == orchestrator.name
             is_dispatcher = agent.kind == "dispatcher"
+            # A delegation_pool target is a SERVER-ONLY group: the orchestrator's
+            # delegate_task children reach its LLM server directly via
+            # DELEGATION_BASE_URL; it never serves a gym /task endpoint. So skip
+            # its bootstrap + ng_run head entirely (an idle ng_run head would also
+            # crash on the mandatory resources_server.name it has no reason to set).
+            # Its LLM server was already added at the top of the group loop.
+            if (not is_dispatcher) and orchestrator.delegation_pool and agent.name == orchestrator.delegation_pool:
+                continue
             # Dispatchers don't emit traces or accept peer calls — keep
             # the overlay minimal so the dispatcher process doesn't try to
             # mount HermesAgentConfig at startup.
@@ -435,6 +484,11 @@ def _build_jobs(
             # the gym to finish — otherwise NeMo-Run's wait-any sbatch
             # wrapper sees mergeback exit (in ms) and SIGKILLs the gym.
             gym_done_sentinel = f"{output_dir}/.gym_done" if (merge_back or enrich_worklogs) else None
+            # Lazy/dynamic allocation: a prehosted orchestrator has NO in-job LLM
+            # server. Its own LLM (server_address) AND its delegate_task children
+            # (delegation literal) both route to the external endpoint. The value
+            # may be a runtime shell expression (e.g. $(cat .../router_url)/v1).
+            _orch_prehosted = orchestrator.prehosted_url
             commands.append(
                 Command(
                     script=NemoGymRolloutsScript(
@@ -457,12 +511,19 @@ def _build_jobs(
                             f'+hermes_agent.responses_api_agents.hermes_agent.agent_name="{orchestrator.name}" '
                             + extra_arguments
                         ).strip(),
-                        server=server_script,
+                        server=None if _orch_prehosted else server_script,
+                        server_address=_orch_prehosted if _orch_prehosted else None,
                         sandbox=sandbox_script,
                         gym_path=gym_path,
                         hermes_agent_path=hermes_agent_path,
                         policy_api_key=policy_api_key,
                         policy_model_name=policy_model_name or group.model,
+                        # delegation_pool: route delegate_task children to a
+                        # SEPARATE LLM server (resolved cross-het-group at runtime).
+                        # Prehosted: route them to the same external endpoint.
+                        delegation_server=None if _orch_prehosted else delegation_server_script,
+                        delegation_base_url_literal=_orch_prehosted if _orch_prehosted else None,
+                        delegation_model_literal=group.model if _orch_prehosted else None,
                     ),
                     container=gym_container,
                     name=f"{expname}_{orchestrator.name}_rollouts",
@@ -511,7 +572,36 @@ def _build_jobs(
                 )
 
         # 5. HardwareConfig for this group.
-        if group.is_dispatcher:
+        if group.is_prehosted:
+            # Lazy/dynamic allocation: the orchestrator driver (agent loop +
+            # delegate_task ProcessPoolExecutor workers + MCP + sandbox) is pure
+            # CPU work — place it on the cluster's CPU partition (long walltime,
+            # ~instant alloc) and grab a whole node's worth of cores so up to
+            # `max_concurrent_children` worker subprocesses run unthrottled.
+            #
+            # Q2 override (gated, default-off): on a GPU-starved cluster the CPU
+            # partition's job-count QOS caps how many seeds can run concurrently,
+            # and packing >1 driver onto one CPU node triggers a shared-FS
+            # concurrent-import wall.  Setting NS_PREHOSTED_PARTITION places each
+            # driver on its OWN node of that partition instead (e.g. the GPU
+            # ``batch`` partition under the generous ``normal`` QOS) → 1 driver /
+            # node (no import contention) and no CPU-QOS ceiling.  num_gpus stays
+            # 0 by default (the driver routes its LLM to the shared router);
+            # NS_PREHOSTED_GPUS>0 additionally co-locates a server in the driver
+            # job so the node's GPUs aren't idle.
+            _override_part = os.environ.get("NS_PREHOSTED_PARTITION")
+            cpu_partition = _override_part or (cluster_config or {}).get("cpu_partition") or partition
+            _override_gpus = int(os.environ.get("NS_PREHOSTED_GPUS", "0") or "0")
+            prehosted_sbatch = dict(sbatch_kwargs or {})
+            prehosted_sbatch.setdefault("exclusive", True)
+            hardware = HardwareConfig(
+                partition=cpu_partition,
+                num_gpus=_override_gpus,
+                num_nodes=1,
+                num_tasks=1,
+                sbatch_kwargs=prehosted_sbatch,
+            )
+        elif group.is_dispatcher:
             # Dispatcher het-group: no GPUs, single CPU task.  ``num_tasks=1``
             # mirrors how a plain CPU-only NeMo-Run job is sized.
             hardware = HardwareConfig(
